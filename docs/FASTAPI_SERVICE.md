@@ -1,111 +1,147 @@
-# FastAPI 服务结构说明
+# FastAPI 服务实现说明
 
-## 1. 总览
+本文详细介绍在线服务层（`app/main.py`）的架构、关键流程以及扩展方式，适用于需要阅读、调试或扩展推荐 API 的开发人员。
 
-项目通过 FastAPI 暴露推荐接口，入口文件为 `app/main.py`。服务负责加载训练产物（相似度矩阵、热门榜、元数据）并对外提供查询接口。部署时通常搭配 Uvicorn/Gunicorn 运行。
+---
 
-关键依赖：
-- FastAPI / Pydantic：API 定义与数据模型
-- pandas：读取数据集元信息
-- pickle / json：加载模型文件
+## 1. 服务概述
 
-启动命令示例：
-```bash
-uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
-```
+- 框架：FastAPI + Uvicorn
+- 模式：异步路由 + 线程池隔离
+- 关键能力：
+  - 启动时加载模型、召回索引、元数据、实验配置
+  - Redis 缓存/特征库优先，SQLite 兜底
+  - 多渠道召回融合 + LightGBM 排序 + 实验权重
+  - 超时、熔断、三级降级、异常曝光
+  - Prometheus 指标与曝光日志埋点
 
-## 2. 文件结构
+在线服务与离线流水线通过 `models/` 与 `data/processed/` 解耦，支持热更新。
 
-```
-app/
-  __init__.py
-  main.py          # FastAPI 应用定义
-```
+---
 
-`app/main.py` 中的重要模块：
-- `RecommendationItem`, `RecommendationResponse`, `SimilarResponse`：接口输出的 Pydantic 模型
-- `load_models()`：应用启动事件，加载模型与元数据
-- `_combine_scores()`、`_build_response_items()`：推荐结果合并与格式化逻辑
-- API 路由：`/health`、`/similar/{dataset_id}`、`/recommend/detail/{dataset_id}`
+## 2. 启动流程（`load_models`）
 
-## 3. 启动流程
+1. 初始化日志、线程池、缓存：
+   - `get_cache()`：Redis 缓存（推荐结果、热门榜）
+   - `get_hot_tracker()`：记录热点数据集中台
+2. 加载模型包：
+   - `item_sim_behavior.pkl`、`item_sim_content.pkl`
+   - `top_items.json`、`item_recall_vector.json`
+   - LightGBM 排序模型 `rank_model.pkl`（及 ONNX）
+3. 加载特征与画像：
+   - 数据集元信息/标签、统计表、用户画像、用户历史
+   - 若配置 `FEATURE_REDIS_URL`，优先从 Redis 获取，失败降级 SQLite
+4. 补充多路召回索引：
+   - `user_similarity.pkl`、`tag_to_items.json`、`category_index.json`、`price_bucket_index.json` 等
+5. 加载实验配置：
+   - `config/experiments.yaml`，通过 `assign_variant` 决定请求的实验变体
+6. 初始化 `FallbackStrategy`（Redis → 预计算 → 热门）与 `HealthChecker`。
 
-1. 服务启动时触发
-## 3.1 用户画像与个性化
+通过将所有对象挂载在 `app.state` 上，避免全局变量同时保持线程安全。
 
-- 从 `data/processed/interactions.parquet` 构建用户最近行为列表（按时间排序，权重归一化）。
-- 解析数据集标签，统计用户偏好标签，用于个性化加权。
-- `app.state.user_history`、`app.state.user_tag_preferences` 在推荐阶段用于：
-  1. 过滤用户已浏览/购买的数据集；
-  2. 根据最近行为的相似度和标签偏好对候选项提升得分，并将 `reason` 标记为 `+personalized`。
-- 未登录用户则直接返回基础候选（行为+内容+热门）。
+---
 
- `@app.on_event("startup")`，依次加载：
-   - `models/item_sim_behavior.pkl`
-   - `models/item_sim_content.pkl`
-   - `models/top_items.json`
-   - `data/processed/dataset_features.parquet`（用于补全标题、价格、图片等）
-2. 加载结果缓存在 `app.state`：
-   - `behavior`：行为相似矩阵（`dict[int, dict[int, float]]`）
-   - `content`：内容相似矩阵
-   - `popular`：热门数据集列表
-   - `metadata`：数据集元信息（标题、价格、封面）
-3. 若缺少模型文件或元数据，服务会打印 warning；相关接口可能返回空结果或 404。
+## 3. 请求处理流程
 
-## 4. 接口说明
+### 3.1 中间件
 
-### 4.1 健康检查
-- **路径**：`GET /health`
-- **返回**：`{"status": "ok"}`
-- **用途**：服务存活检测
+`request_context_middleware`：
 
-### 4.2 相似数据集
-- **路径**：`GET /similar/{dataset_id}`
-- **参数**：
-  - `dataset_id` (path)：目标数据集 ID
-  - `limit` (query，可选，默认 10)：返回条数
-- **逻辑**：
-  1. 调用 `_combine_scores` 结合行为相似、内容相似与热门兜底
-  2. 使用 `_build_response_items` 整理基础信息与推荐理由
-  3. 若无结果，返回 404
-- **响应**：`SimilarResponse`
+- 读取/生成 `X-Request-ID`
+- 记录响应耗时，添加 `X-Response-Time`
+- 方便日志、曝光与实验对齐
 
-### 4.3 详情页推荐
-- **路径**：`GET /recommend/detail/{dataset_id}`
-- **参数**：
-  - `dataset_id` (path)：当前页面数据集 ID
-  - `user_id` (query，可选)：预留字段，目前未使用
-  - `limit` (query，可选，默认 10)：返回条数
-- **逻辑**：与 `/similar` 类似，目前以物品相似为主；用户画像可在后续迭代中加权
-- **响应**：`RecommendationResponse`
+### 3.2 通用工具
 
-### 4.4 响应字段
-`RecommendationItem` 与 `SimilarResponse` 中的字段：
-- `dataset_id`：推荐的数据集
-- `title`：标题（若元数据缺失可能为空）
-- `price`：价格
-- `cover_image`：封面 URL（目前 `dataset_features` 中需包含该字段）
-- `score`：归一化后的相似度/权重
-- `reason`：推荐来源（behavior / content / popular）
+- `_run_in_executor`：将阻塞操作提交至线程池，并更新队列长度指标 `recommendation_thread_pool_queue_size`
+- `_call_blocking`：在协程内对阻塞函数设置超时，超时后写入 `recommendation_timeouts_total`
+- `_serve_fallback`：统一处理三级降级，并打点 `recommendation_degraded_total`
+- `_augment_with_multi_channel`：加载标签/行业/价格/UserCF 等召回结果叠加
 
-## 5. 常见问题
+### 3.3 接口逻辑
 
-| 问题 | 排查建议 |
-| ---- | -------- |
-| 启动日志显示模型文件缺失 | 确认 `models/` 目录内的文件已生成（运行 `pipeline/train_models.py`） |
-| 返回结果为空或 404 | 检查 `data/processed` 与 `models/` 是否最新；`dataset_id` 是否存在于模型矩阵中 |
-| 修改模型后服务仍返回旧结果 | 重新运行 `uvicorn`，或触发自定义的热更新逻辑 |
+1. **`GET /similar/{dataset_id}`**
+   - 优先读取缓存
+   - 组合行为/内容/向量召回 + 多渠道补充
+   - 排序失败或超时时降级热门榜
+   - 无结果：返回 503，并在曝光日志标记 `degrade_reason`
 
-## 6. 扩展建议
+2. **`GET /recommend/detail/{dataset_id}`**
+   - 可选 `user_id`，用于：
+     - 实验变体选择（调整渠道权重）
+     - 个性化过滤（移除近期浏览/购买）
+     - UserCF 与标签偏好加权
+   - 执行 LightGBM 排序（带熔断器）
+   - 融合请求、实验、降级信息写入曝光日志
 
-- 接入用户画像与个性化排序：在 `_combine_scores` 中引入用户权重、实时行为等
-- 增加异常处理与日志：记录请求耗时、命中/兜底比例
-- 集成身份/权限控制：如需将 `/recommend` 暴露给第三方，需要加入鉴权
+3. **`GET /hot/trending`**
+   - Redis 热度统计 → 热门榜兜底 → 元数据补全
 
-## 7. 开发调试提示
+4. **`POST /models/reload`**
+   - 支持主模型替换与影子模型
+   - `rollout` 控制流量比例（0~1）
+   - 影子模型在请求阶段按比例随机分流并在曝光中标记 `variant`
 
-- 使用 `curl` 或 Postman 调试接口，观察返回结构是否符合预期
-- 在 VSCode/IDE 中可直接运行 `uvicorn`，结合 FastAPI 默认的 Swagger UI (`/docs`) 进行调试
-- 若需单元测试，可使用 FastAPI 的 `TestClient` 模拟请求
+5. **`GET /health`、`/metrics`**
+   - Health：检查缓存与模型加载状态
+   - Metrics：Prometheus 标准输出
 
-以上即为 FastAPI 服务的主要结构与使用说明，帮助新成员快速理解在线推荐接口的行为与拓展方式。
+---
+
+## 4. 指标与日志
+
+主要指标：
+
+| 名称 | 标签 | 说明 |
+| --- | --- | --- |
+| `recommendation_requests_total` | `endpoint` / `status` | 请求量与成功率 |
+| `recommendation_latency_seconds` | `endpoint` | 响应耗时直方图 |
+| `recommendation_count` | `endpoint` | 返回条数 |
+| `recommendation_degraded_total` | `endpoint` / `reason` | 降级次数 |
+| `recommendation_timeouts_total` | `endpoint` / `operation` | 超时统计 |
+| `recommendation_thread_pool_queue_size` | 无 | 线程池队列深度快照 |
+| `cache_requests_total`、`cache_hit_rate` | - | 缓存命中情况 |
+| `fallback_triggered_total` | `reason` / `level` | 兜底来源 |
+
+曝光日志：`data/evaluation/exposure_log.jsonl`，字段包括：
+
+- `request_id`、`user_id`、`page_id`
+- `algorithm_version`（模型 run_id）
+- `context.endpoint`、`context.variant`（primary/shadow）
+- `context.degrade_reason`、`context.experiment_variant`
+
+---
+
+## 5. 扩展与调试
+
+### 5.1 扩展建议
+
+- **新增召回通道**：在 `pipeline/recall_engine_v2.py` 产出索引，再于 `_augment_with_multi_channel` 中注入得分。
+- **实时特征**：可在 `FeatureEngineV2` 中新增字段，并扩展 Redis 同步逻辑。
+- **鉴权限流**：建议在 Nginx/Ingress 或 FastAPI 中间件层引入（例如 JWT、请求配额）。
+- **A/B 实验**：增加新的 Experiment 配置或实现多实验同时分桶。
+- **监控**：可根据需要在 `app/metrics.py` 添加业务指标（如命中率、曝光量）。
+
+### 5.2 调试技巧
+
+1. 使用 `curl` 或 Swagger UI (`/docs`) 快速测试，注意传入 `X-Request-ID` 便于追踪。
+2. 查看日志与曝光：`tail -f data/evaluation/exposure_log.jsonl`。
+3. 监控降级：关注 `recommendation_degraded_total` 与 `reason` 标签。
+4. 实验验证：修改 `config/experiments.yaml` → `/models/reload` → 调用接口，检查响应与曝光中的 `experiment_variant`。
+5. 线程池与超时：如观察到队列堆积，可通过环境变量调整最大线程数或召回权重。
+
+---
+
+## 6. 常见问题
+
+| 问题 | 处理建议 |
+| --- | --- |
+| `/health` 返回 `degraded` | 检查 Redis 或模型文件是否缺失，必要时运行 `scripts/run_pipeline.sh --sync-only` |
+| 接口频繁返回热门兜底 | 查看召回索引是否最新、PIPELINE 是否成功运行、或是否触发了超时/熔断 |
+| 排序模型报错或无法加载 | 确认 `rank_model.pkl` 有效，必要时删除后重新训练；ONNX 导出失败可忽略（有日志提醒） |
+| 实验结果未生效 | 检查 `user_id` 是否传入、曝光日志 `experiment_variant` 是否变化、配置文件是否仍为 `status: active` |
+| Redis 不可访问 | 服务会自动降级 SQLite/热门；恢复后运行 `--sync-only` 同步特征，并 `/models/reload` 刷新缓存 |
+
+---
+
+通过以上说明，可快速理解在线服务的关键逻辑并在出现问题时进行定位与扩展。若代码或指标发生变更，请同步更新本文档。***

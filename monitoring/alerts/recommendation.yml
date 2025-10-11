@@ -1,0 +1,56 @@
+groups:
+  - name: recommendation_service
+    interval: 1m
+    rules:
+      - alert: RecommendationHighErrorRate
+        expr: |
+          sum(rate(recommendation_requests_total{status!="success"}[5m])) /
+          sum(rate(recommendation_requests_total[5m])) > 0.05
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "推荐 API 错误率超过 5%"
+          description: "当前错误率 = {{ $value | humanizePercentage }}，请检查服务日志。"
+
+      - alert: RecommendationLatencyHigh
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum(rate(recommendation_latency_seconds_bucket[5m])) by (le, endpoint)
+          ) > 0.2
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "推荐接口 P95 延迟超出 200ms"
+          description: "接口 {{ $labels.endpoint }} 的 P95 延迟为 {{ $value | humanizeDuration }}。"
+
+      - alert: DegradeRateSpike
+        expr: sum(rate(recommendation_degraded_total[5m])) > 1
+        for: 3m
+        labels:
+          severity: warning
+        annotations:
+          summary: "降级次数异常"
+          description: "过去 5 分钟降级次数 >1/s，请查 Redis 或召回模型状态。"
+
+      - alert: DataQualityScoreDrop
+        expr: |
+          min(data_quality_score{table=~"interactions|dataset_features|user_profile"}) < 80
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "数据质量得分低于阈值"
+          description: "表 {{ $labels.table }} 的质量得分仅 {{ $value | printf \"%.1f\" }}，请检查离线流水线。"
+
+      - alert: SchemaContractViolation
+        expr: |
+          min_over_time(data_schema_contract_status[15m]) < 1
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Schema 合约校验失败"
+          description: "{{ $labels.table }} 在过去 15 分钟存在 Schema 违规，请查看 data_quality_report_v2.json。"

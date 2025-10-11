@@ -1,0 +1,15 @@
+FROM apache/airflow:2.9.2-python3.10
+
+USER root
+
+# Install build tools required for scientific Python packages.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    g++ \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy project requirements to install inside the image.
+COPY requirements.txt /opt/recommend/requirements.txt
+
+USER airflow
+RUN pip install --no-cache-dir -r /opt/recommend/requirements.txt

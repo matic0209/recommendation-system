@@ -1,0 +1,13 @@
+experiments:
+  recommendation_detail:
+    status: active
+    salt: "recommend-detail-v1"
+    variants:
+      - name: control
+        allocation: 0.5
+        parameters: {}
+      - name: content_boost
+        allocation: 0.5
+        parameters:
+          content_weight: 0.8
+          vector_weight: 0.5

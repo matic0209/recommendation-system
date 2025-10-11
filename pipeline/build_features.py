@@ -2,16 +2,29 @@
 from __future__ import annotations
 
 import logging
+import sqlite3
+import os
+import urllib.parse
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict
 
 import numpy as np
 import pandas as pd
 
-from config.settings import DATA_DIR
+from config.settings import DATA_DIR, FEATURE_STORE_PATH
+from pipeline.data_cleaner import DataCleaner
+from pipeline.build_features_v2 import FeatureEngineV2
+from pipeline.feature_store_redis import RedisFeatureStore
 
 LOGGER = logging.getLogger(__name__)
 PROCESSED_DIR = DATA_DIR / "processed"
+FEATURE_STORE_TABLES: Dict[str, tuple[str, ...]] = {
+    "interactions": ("user_id", "dataset_id"),
+    "dataset_features": ("dataset_id",),
+    "user_profile": ("user_id",),
+    "dataset_stats": ("dataset_id",),
+}
 
 
 def _load_parquet(path: Path) -> pd.DataFrame:
@@ -63,20 +76,20 @@ def _build_interactions_from_frame(
 
 
 def build_interactions(inputs: Dict[str, Path]) -> pd.DataFrame:
-    order_path = inputs.get("order_tab")
+    task_path = inputs.get("task") or inputs.get("order_tab")
     api_order_path = inputs.get("api_order")
 
     interactions = []
-    if order_path is not None:
-        order_df = _load_parquet(order_path)
+    if task_path is not None:
+        task_df = _load_parquet(task_path)
         interactions.append(
             _build_interactions_from_frame(
-                order_df,
+                task_df,
                 user_col="create_user",
                 item_col="dataset_id",
                 price_col="price",
                 time_col="create_time",
-                source="order_tab",
+                source="task",
             )
         )
     if api_order_path is not None:
@@ -102,6 +115,23 @@ def build_interactions(inputs: Dict[str, Path]) -> pd.DataFrame:
         )
         return result
     return pd.DataFrame(columns=["user_id", "dataset_id", "weight", "last_event_time"])
+
+
+def build_dataset_stats(interactions: pd.DataFrame) -> pd.DataFrame:
+    if interactions.empty:
+        return pd.DataFrame(columns=["dataset_id", "interaction_count", "total_weight", "last_event_time"])
+
+    stats = interactions.copy()
+    if "last_event_time" in stats.columns:
+        stats["last_event_time"] = pd.to_datetime(stats["last_event_time"], errors="coerce")
+
+    aggregated = stats.groupby("dataset_id", as_index=False).agg(
+        interaction_count=("dataset_id", "count"),
+        total_weight=("weight", "sum"),
+        last_event_time=("last_event_time", "max"),
+    )
+    aggregated["total_weight"] = aggregated["total_weight"].fillna(0.0)
+    return aggregated
 
 
 def build_dataset_features(dataset_path: Path) -> pd.DataFrame:
@@ -145,18 +175,67 @@ def build_user_profile(user_path: Path) -> pd.DataFrame:
     return profile
 
 
+def _sync_feature_store(tables: Dict[str, pd.DataFrame]) -> Dict[str, int]:
+    counts: Dict[str, int] = {}
+    FEATURE_STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+    with sqlite3.connect(FEATURE_STORE_PATH) as conn:
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS feature_metadata (
+                view_name TEXT PRIMARY KEY,
+                refreshed_at TEXT NOT NULL,
+                row_count INTEGER NOT NULL
+            )
+            """
+        )
+
+        for name, frame in tables.items():
+            if frame.empty:
+                LOGGER.warning("Skipping feature store sync for '%s' (empty frame)", name)
+                continue
+
+            sanitized = frame.copy()
+            if name in {"interactions", "dataset_stats"} and "last_event_time" in sanitized.columns:
+                timestamps = pd.to_datetime(sanitized["last_event_time"], errors="coerce", utc=True)
+                sanitized["last_event_time"] = timestamps.dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+            sanitized.to_sql(name, conn, if_exists="replace", index=False)
+            counts[name] = len(sanitized)
+
+            for idx, key in enumerate(FEATURE_STORE_TABLES[name]):
+                conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{name}_{idx} ON {name} ({key})")
+
+            conn.execute(
+                """
+                INSERT INTO feature_metadata(view_name, refreshed_at, row_count)
+                VALUES(?, ?, ?)
+                ON CONFLICT(view_name) DO UPDATE SET
+                    refreshed_at=excluded.refreshed_at,
+                    row_count=excluded.row_count
+                """,
+                (name, datetime.now(timezone.utc).isoformat(), len(sanitized)),
+            )
+
+    return counts
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     _ensure_output_dir(PROCESSED_DIR)
 
     business_dir = DATA_DIR / "business"
 
-    interactions = build_interactions(
-        {
-            "order_tab": business_dir / "order_tab.parquet",
-            "api_order": business_dir / "api_order.parquet",
-        }
-    )
+    interaction_inputs: Dict[str, Path] = {"api_order": business_dir / "api_order.parquet"}
+    task_parquet = business_dir / "task.parquet"
+    legacy_order_parquet = business_dir / "order_tab.parquet"
+    if task_parquet.exists() or not legacy_order_parquet.exists():
+        interaction_inputs["task"] = task_parquet
+    else:
+        interaction_inputs["order_tab"] = legacy_order_parquet
+
+    interactions = build_interactions(interaction_inputs)
     interactions_path = PROCESSED_DIR / "interactions.parquet"
     interactions.to_parquet(interactions_path, index=False)
     LOGGER.info("Saved interactions to %s", interactions_path)
@@ -170,6 +249,87 @@ def main() -> None:
     user_path = PROCESSED_DIR / "user_profile.parquet"
     user_profile.to_parquet(user_path, index=False)
     LOGGER.info("Saved user profile to %s", user_path)
+
+    dataset_stats = build_dataset_stats(interactions)
+    stats_path = PROCESSED_DIR / "dataset_stats.parquet"
+    dataset_stats.to_parquet(stats_path, index=False)
+    LOGGER.info("Saved dataset stats to %s", stats_path)
+
+    sync_counts = _sync_feature_store(
+        {
+            "interactions": interactions,
+            "dataset_features": dataset_features,
+            "user_profile": user_profile,
+            "dataset_stats": dataset_stats,
+        }
+    )
+    if sync_counts:
+        summary = ", ".join(f"{name}={count}" for name, count in sync_counts.items())
+        LOGGER.info("Synced feature store (%s)", summary)
+    else:
+        LOGGER.warning("Feature store sync skipped because all views were empty")
+
+    # Phase 2 enhancements: cleaning + advanced features
+    LOGGER.info("Running data cleaning and enhanced feature engineering (v2)...")
+    cleaner = DataCleaner()
+    cleaned = cleaner.clean_all()
+
+    # Build enhanced features using cleaned data
+    engine = FeatureEngineV2(use_cleaned=True)
+    cleaned_interactions = cleaned.get("interactions", interactions)
+    cleaned_dataset = cleaned.get("dataset_features", dataset_features)
+    cleaned_user_profile = cleaned.get("user_profile", user_profile)
+
+    # Recompute dataset stats from cleaned interactions
+    cleaned_dataset_stats = build_dataset_stats(cleaned_interactions)
+
+    user_features_v2 = engine.build_user_features_v2(
+        cleaned_interactions,
+        cleaned_user_profile,
+        cleaned_dataset,
+    )
+    dataset_features_v2 = engine.build_dataset_features_v2(
+        cleaned_dataset,
+        cleaned_dataset_stats,
+        cleaned_interactions,
+    )
+
+    engine.save_features(
+        user_features_v2,
+        dataset_features_v2,
+        cleaned_interactions,
+        cleaned_dataset_stats,
+    )
+
+    LOGGER.info(
+        "Enhanced feature engineering completed (user_features=%d cols, dataset_features=%d cols)",
+        len(user_features_v2.columns),
+        len(dataset_features_v2.columns),
+    )
+
+    redis_url = os.getenv("FEATURE_REDIS_URL") or os.getenv("REDIS_FEATURE_URL")
+    if redis_url:
+        parsed = urllib.parse.urlparse(redis_url)
+        host = parsed.hostname or "localhost"
+        port = parsed.port or 6379
+        password = parsed.password
+        db = int(parsed.path.lstrip("/")) if parsed.path else 1
+
+        try:
+            redis_store = RedisFeatureStore(host=host, port=port, db=db, password=password)
+            redis_store.sync_user_features(user_features_v2)
+            redis_store.sync_dataset_features(dataset_features_v2)
+            redis_store.sync_dataset_stats(cleaned_dataset_stats)
+            redis_store.sync_user_history(cleaned_interactions)
+            LOGGER.info(
+                "Redis feature store synchronized successfully (host=%s, db=%s)",
+                host,
+                db,
+            )
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("Redis feature store sync skipped due to error: %s", exc)
+    else:
+        LOGGER.info("Redis feature store not configured; skipping sync step")
 
 
 if __name__ == "__main__":

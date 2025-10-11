@@ -1,0 +1,30 @@
+route:
+  receiver: "default"
+  group_by: ["alertname", "table", "endpoint"]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 3h
+  routes:
+    - receiver: "data-quality"
+      matchers:
+        - alertname=DataQualityScoreDrop
+    - receiver: "data-quality"
+      matchers:
+        - alertname=SchemaContractViolation
+
+receivers:
+  - name: "default"
+    webhook_configs:
+      - url: "http://notification-gateway:9000/webhook/recommend-default"
+        send_resolved: true
+  - name: "data-quality"
+    webhook_configs:
+      - url: "http://notification-gateway:9000/webhook/data-quality"
+        send_resolved: true
+
+inhibit_rules:
+  - source_matchers:
+      - severity=critical
+    target_matchers:
+      - severity=warning
+    equal: ["alertname", "table"]

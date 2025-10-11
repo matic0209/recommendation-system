@@ -13,6 +13,11 @@ load_dotenv()
 BASE_DIR: Path = Path(__file__).resolve().parents[1]
 DATA_DIR: Path = BASE_DIR / "data"
 MODELS_DIR: Path = BASE_DIR / "models"
+FEATURE_STORE_PATH: Path = DATA_DIR / "feature_store.db"
+MLFLOW_DIR: Path = BASE_DIR / "mlruns"
+MLFLOW_TRACKING_URI: str = os.getenv("MLFLOW_TRACKING_URI", f"file://{MLFLOW_DIR}")
+MLFLOW_EXPERIMENT_NAME: str = os.getenv("MLFLOW_EXPERIMENT_NAME", "dataset_recommendation")
+MODEL_REGISTRY_PATH: Path = MODELS_DIR / "model_registry.json"
 
 
 @dataclass
@@ -31,6 +36,23 @@ class DatabaseConfig:
             f"mysql+pymysql://{self.user}:{self.password}"
             f"@{self.host}:{self.port}/{self.name}"
         )
+
+    def get_engine_kwargs(self) -> dict:
+        """
+        Get SQLAlchemy engine keyword arguments for connection pooling.
+
+        Returns:
+            Dict with pool_size, max_overflow, pool_recycle, pool_pre_ping, etc.
+        """
+        return {
+            "pool_size": int(os.getenv("DB_POOL_SIZE", "10")),
+            "max_overflow": int(os.getenv("DB_MAX_OVERFLOW", "20")),
+            "pool_recycle": int(os.getenv("DB_POOL_RECYCLE", "3600")),
+            "pool_pre_ping": os.getenv("DB_POOL_PRE_PING", "true").lower() == "true",
+            "connect_args": {
+                "connect_timeout": int(os.getenv("DB_CONNECT_TIMEOUT", "10")),
+            },
+        }
 
 
 def load_database_configs() -> Dict[str, DatabaseConfig]:
@@ -57,6 +79,11 @@ __all__ = [
     "BASE_DIR",
     "DATA_DIR",
     "MODELS_DIR",
+    "FEATURE_STORE_PATH",
+    "MLFLOW_DIR",
+    "MLFLOW_TRACKING_URI",
+    "MLFLOW_EXPERIMENT_NAME",
+    "MODEL_REGISTRY_PATH",
     "DatabaseConfig",
     "load_database_configs",
 ]

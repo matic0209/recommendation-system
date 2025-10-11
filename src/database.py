@@ -22,11 +22,23 @@ class DatabaseManager:
     def _connect(self):
         """建立数据库连接"""
         try:
+            import os
             connection_string = (
                 f"mysql+pymysql://{self.config['DB_USER']}:{self.config['DB_PASSWORD']}"
                 f"@{self.config['DB_HOST']}:{self.config['DB_PORT']}/{self.config['DB_NAME']}"
             )
-            self.engine = create_engine(connection_string, echo=False)
+            # P0-02 优化: 应用连接池配置
+            pool_kwargs = {
+                "pool_size": int(os.getenv("DB_POOL_SIZE", "10")),
+                "max_overflow": int(os.getenv("DB_MAX_OVERFLOW", "20")),
+                "pool_recycle": int(os.getenv("DB_POOL_RECYCLE", "3600")),
+                "pool_pre_ping": os.getenv("DB_POOL_PRE_PING", "true").lower() == "true",
+                "connect_args": {
+                    "connect_timeout": int(os.getenv("DB_CONNECT_TIMEOUT", "10")),
+                },
+                "echo": False
+            }
+            self.engine = create_engine(connection_string, **pool_kwargs)
             self.connection = self.engine.connect()
             self.logger.info("数据库连接成功")
         except Exception as e:
@@ -58,7 +70,7 @@ class DatabaseManager:
                 o.create_time        AS create_time,
                 COALESCE(o.pay_time, o.update_time, o.create_time) AS event_time,
                 'dataset_order'      AS source
-            FROM order_tab o
+            FROM task o
             WHERE o.is_delete = 0
               AND o.dataset_id IS NOT NULL
               AND o.create_user IS NOT NULL

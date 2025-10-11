@@ -1,0 +1,171 @@
+sources:
+  business:
+    user:
+      primary_key: [id]
+      required_columns:
+        id:
+          type: integer
+          nullable: false
+        company_name:
+          type: string
+          nullable: true
+        province:
+          type: string
+          nullable: true
+        city:
+          type: string
+          nullable: true
+        is_consumption:
+          type: integer
+          nullable: true
+        create_time:
+          type: datetime
+          nullable: false
+    dataset:
+      primary_key: [id]
+      required_columns:
+        id:
+          type: integer
+          nullable: false
+        dataset_name:
+          type: string
+          nullable: false
+        tag:
+          type: string
+          nullable: true
+        price:
+          type: float
+          nullable: true
+        create_company_name:
+          type: string
+          nullable: true
+        create_time:
+          type: datetime
+          nullable: false
+        update_time:
+          type: datetime
+          nullable: true
+    task:
+      primary_key: [id]
+      required_columns:
+        id:
+          type: integer
+          nullable: false
+        dataset_id:
+          type: integer
+          nullable: false
+        create_user:
+          type: integer
+          nullable: false
+        price:
+          type: float
+          nullable: true
+        create_time:
+          type: datetime
+          nullable: false
+        update_time:
+          type: datetime
+          nullable: true
+    api_order:
+      primary_key: [id]
+      required_columns:
+        id:
+          type: integer
+          nullable: false
+        api_id:
+          type: integer
+          nullable: false
+        creator_id:
+          type: integer
+          nullable: false
+        price:
+          type: float
+          nullable: true
+        create_time:
+          type: datetime
+          nullable: false
+        update_time:
+          type: datetime
+          nullable: true
+    dataset_image:
+      primary_key: [id]
+      required_columns:
+        id:
+          type: integer
+          nullable: false
+        dataset_id:
+          type: integer
+          nullable: false
+        image_url:
+          type: string
+          nullable: false
+        create_time:
+          type: datetime
+          nullable: false
+        update_time:
+          type: datetime
+          nullable: true
+  matomo:
+    matomo_log_visit:
+      primary_key: [idvisit]
+      required_columns:
+        idvisit:
+          type: integer
+          nullable: false
+        idsite:
+          type: integer
+          nullable: false
+        idvisitor:
+          type: string
+          nullable: false
+        visit_last_action_time:
+          type: datetime
+          nullable: false
+        user_id:
+          type: string
+          nullable: true
+    matomo_log_link_visit_action:
+      primary_key: [idlink_va]
+      required_columns:
+        idlink_va:
+          type: integer
+          nullable: false
+        idvisit:
+          type: integer
+          nullable: false
+        idsite:
+          type: integer
+          nullable: false
+        server_time:
+          type: datetime
+          nullable: false
+    matomo_log_action:
+      primary_key: [idaction]
+      required_columns:
+        idaction:
+          type: integer
+          nullable: false
+        name:
+          type: string
+          nullable: false
+        type:
+          type: integer
+          nullable: false
+    matomo_log_conversion:
+      primary_key: [idvisit]
+      required_columns:
+        idvisit:
+          type: integer
+          nullable: false
+        idsite:
+          type: integer
+          nullable: false
+        url:
+          type: string
+          nullable: true
+        server_time:
+          type: datetime
+          nullable: false
+        revenue:
+          type: float
+          nullable: true
