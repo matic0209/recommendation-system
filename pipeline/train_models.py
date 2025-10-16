@@ -18,7 +18,7 @@ from sklearn.metrics import roc_auc_score
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import StandardScaler, normalize
 
 try:
     from lightgbm import LGBMClassifier
@@ -47,6 +47,7 @@ LOGGER = logging.getLogger(__name__)
 PROCESSED_DIR = DATA_DIR / "processed"
 REGISTRY_HISTORY_LIMIT = 20
 VECTOR_RECALL_K = 200
+IMAGE_SIMILARITY_WEIGHT = 0.4
 VECTOR_RECALL_PATH = MODELS_DIR / "item_recall_vector.json"
 RANK_MODEL_PATH = MODELS_DIR / "rank_model.pkl"
 
@@ -86,9 +87,11 @@ def train_behavior_similarity(interactions: pd.DataFrame) -> Dict[int, Dict[int,
     return similarity
 
 
-def train_content_similarity(dataset_features: pd.DataFrame) -> Tuple[Dict[int, Dict[int, float]], np.ndarray, List[int]]:
+def train_content_similarity(
+    dataset_features: pd.DataFrame,
+) -> Tuple[Dict[int, Dict[int, float]], np.ndarray, List[int], Dict[str, float]]:
     if dataset_features.empty:
-        return {}, np.empty((0, 0)), []
+        return {}, np.empty((0, 0)), [], {"modalities": 0.0, "image_embedding_dim": 0.0, "image_similarity_weight": 0.0}
 
     features = dataset_features.copy()
     features["text"] = (
@@ -100,8 +103,35 @@ def train_content_similarity(dataset_features: pd.DataFrame) -> Tuple[Dict[int, 
     )
 
     vectorizer = TfidfVectorizer(max_features=5000)
-    matrix = vectorizer.fit_transform(features["text"])
-    similarity_matrix = cosine_similarity(matrix)
+    text_matrix = vectorizer.fit_transform(features["text"])
+    text_similarity = cosine_similarity(text_matrix)
+
+    embedding_cols = [col for col in features.columns if col.startswith("image_embed_mean_")]
+    similarity_matrix = text_similarity
+    modalities = 1
+    embedding_dim = 0
+
+    if embedding_cols:
+        image_vectors = features[embedding_cols].fillna(0.0).to_numpy(dtype=np.float32)
+        if image_vectors.size and image_vectors.shape[0] == text_similarity.shape[0]:
+            image_vectors = normalize(image_vectors)
+            image_similarity = cosine_similarity(image_vectors)
+            similarity_matrix = (
+                (1 - IMAGE_SIMILARITY_WEIGHT) * text_similarity +
+                IMAGE_SIMILARITY_WEIGHT * image_similarity
+            )
+            modalities = 2
+            embedding_dim = image_vectors.shape[1]
+            LOGGER.info(
+                "Combined text and image similarities (image_weight=%s, embedding_dim=%d)",
+                IMAGE_SIMILARITY_WEIGHT,
+                image_vectors.shape[1],
+            )
+        else:
+            LOGGER.warning(
+                "Image embeddings present but shape mismatch (vectors=%s); using text-only similarity",
+                image_vectors.shape if image_vectors.size else 0,
+            )
 
     item_ids = features["dataset_id"].tolist()
     similarity: Dict[int, Dict[int, float]] = {}
@@ -115,7 +145,12 @@ def train_content_similarity(dataset_features: pd.DataFrame) -> Tuple[Dict[int, 
             if score > 0:
                 scores[other_id] = score
         similarity[item_id] = scores
-    return similarity, similarity_matrix, item_ids
+    meta = {
+        "modalities": float(modalities),
+        "image_embedding_dim": float(embedding_dim),
+        "image_similarity_weight": float(IMAGE_SIMILARITY_WEIGHT if modalities > 1 else 0.0),
+    }
+    return similarity, similarity_matrix, item_ids, meta
 
 
 def build_popular_items(interactions: pd.DataFrame, top_k: int = 50) -> List[int]:
@@ -220,6 +255,12 @@ def _prepare_ranking_dataset(
     merged["weight_log"] = np.log1p(merged["total_weight"].clip(lower=0.0))
 
     feature_columns = ["price_log", "description_length", "tag_count", "weight_log", "interaction_count"]
+    optional_columns = [
+        col
+        for col in ["image_richness_score", "image_embed_norm", "has_images", "has_cover"]
+        if col in merged.columns
+    ]
+    feature_columns.extend(optional_columns)
     features = merged[feature_columns].fillna(0.0)
     target = (merged["interaction_count"] > 0).astype(int)
     meta = merged[["dataset_id"]].reset_index(drop=True)
@@ -315,7 +356,7 @@ def main() -> None:
         dataset_stats = dataset_stats_v2
 
     behavior_model = train_behavior_similarity(interactions)
-    content_model, content_matrix, content_ids = train_content_similarity(dataset_features)
+    content_model, content_matrix, content_ids, content_meta = train_content_similarity(dataset_features)
     vector_recall = build_vector_recall(content_matrix, content_ids, VECTOR_RECALL_K)
     popular_items = build_popular_items(interactions)
 
@@ -355,11 +396,14 @@ def main() -> None:
     else:
         LOGGER.warning("Ranking model training skipped due to insufficient label diversity")
 
+    embeddings_available = content_meta.get("modalities", 0.0) > 1.0
     params = {
         "interactions_rows": len(interactions),
         "dataset_features_rows": len(dataset_features),
         "dataset_stats_rows": len(dataset_stats),
         "vector_recall_k": VECTOR_RECALL_K,
+        "image_embeddings_available": embeddings_available,
+        "image_similarity_weight": content_meta.get("image_similarity_weight", 0.0),
     }
     metrics = {
         "behavior_item_count": float(len(behavior_model)),
@@ -369,6 +413,15 @@ def main() -> None:
         "ranking_auc": float(ranking_auc),
         "ranking_positive_rate": float(ranking_target.mean()) if not ranking_target.empty else 0.0,
     }
+    metrics.update({
+        "content_modalities": content_meta.get("modalities", 1.0),
+        "content_image_embedding_dim": content_meta.get("image_embedding_dim", 0.0),
+        "content_image_similarity_weight": content_meta.get("image_similarity_weight", 0.0),
+    })
+
+    embeddings_path = PROCESSED_DIR / "dataset_image_embeddings.parquet"
+    if embeddings_path.exists():
+        artifacts.append(embeddings_path)
 
     if not ranking_scores.empty:
         ranking_snapshot = ranking_meta.copy()

@@ -6,7 +6,7 @@
 
 ## 前置要求
 
-- Python 3.10+
+- Python 3.8+
 - Docker & Docker Compose
 - （可选）Kubernetes集群
 

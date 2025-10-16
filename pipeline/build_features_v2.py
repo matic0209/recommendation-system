@@ -1,4 +1,4 @@
-"""Enhanced feature engineering with 75+ features for recommendation models."""
+"""Enhanced feature engineering with 75+ features for recommendation models (now with image features!)."""
 from __future__ import annotations
 
 import logging
@@ -12,11 +12,13 @@ import numpy as np
 import pandas as pd
 from sklearn.feature_extraction.text import CountVectorizer
 
-from config.settings import DATA_DIR, FEATURE_STORE_PATH
+from config.settings import BASE_DIR, DATA_DIR, FEATURE_STORE_PATH
+from pipeline.image_features import ImageFeatureExtractor
 
 LOGGER = logging.getLogger(__name__)
 PROCESSED_DIR = DATA_DIR / "processed"
 CLEANED_DIR = DATA_DIR / "cleaned"
+BUSINESS_DIR = DATA_DIR / "business"
 
 
 class FeatureEngineV2:
@@ -219,9 +221,11 @@ class FeatureEngineV2:
         dataset: pd.DataFrame,
         dataset_stats: pd.DataFrame,
         interactions: pd.DataFrame,
+        dataset_image: pd.DataFrame | None = None,
+        image_embeddings: pd.DataFrame | None = None,
     ) -> pd.DataFrame:
         """
-        Build enhanced dataset features (25+ features).
+        Build enhanced dataset features (30+ features including image features).
 
         Features:
         - Basic (5): id, name, description, tag, price, company
@@ -229,10 +233,43 @@ class FeatureEngineV2:
         - Statistics (8): interaction_count, total_revenue, avg_price_per_interaction, etc.
         - Time features (5): days_since_created, days_since_last_purchase, etc.
         - Popularity (3): popularity_score, rank, percentile
+        - Image features (10+): image_count, has_cover, image_freshness, etc.
         """
-        LOGGER.info("Building enhanced dataset features...")
+        LOGGER.info("Building enhanced dataset features (with images)...")
 
         features = dataset.copy()
+
+        # === Image Features (10+) NEW! ===
+        if dataset_image is not None and not dataset_image.empty:
+            LOGGER.info("Adding image features...")
+            image_extractor = ImageFeatureExtractor(self.data_dir)
+            image_features = image_extractor.extract_image_features(dataset, dataset_image)
+
+            # Merge image features
+            features = features.merge(
+                image_features[[
+                    "dataset_id", "image_count", "has_images", "has_cover",
+                    "avg_image_order", "image_freshness_days", "image_freshness_score",
+                    "image_update_frequency", "image_richness_score", "cover_position"
+                ]],
+                on="dataset_id",
+                how="left",
+            )
+
+            LOGGER.info("Added %d image features", len([c for c in features.columns if "image" in c or "cover" in c]))
+        else:
+            LOGGER.warning("No image data provided, skipping image features")
+
+        if image_embeddings is not None and not image_embeddings.empty:
+            embedding_dims = len([c for c in image_embeddings.columns if c.startswith("image_embed_mean_")])
+            LOGGER.info(
+                "Merging visual embeddings (%d datasets, %d dims)...",
+                len(image_embeddings),
+                embedding_dims,
+            )
+            features = features.merge(image_embeddings, on="dataset_id", how="left")
+        else:
+            LOGGER.warning("No visual embeddings available; downstream models will rely on text-only signals")
 
         # === Text Features (5) ===
         features["description_length"] = (
@@ -458,7 +495,7 @@ class FeatureEngineV2:
 
 
 def main() -> None:
-    """Build enhanced features."""
+    """Build enhanced features (with image features!)."""
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
     engine = FeatureEngineV2(use_cleaned=True)
@@ -468,6 +505,30 @@ def main() -> None:
     interactions = pd.read_parquet(CLEANED_DIR / "interactions.parquet")
     dataset = pd.read_parquet(CLEANED_DIR / "dataset_features.parquet")
     user_profile = pd.read_parquet(CLEANED_DIR / "user_profile.parquet")
+
+    # Load image data (NEW!)
+    dataset_image_path = BUSINESS_DIR / "dataset_image.parquet"
+    if dataset_image_path.exists():
+        LOGGER.info("Loading dataset images...")
+        dataset_image = pd.read_parquet(dataset_image_path)
+        LOGGER.info("Loaded %d image records", len(dataset_image))
+    else:
+        LOGGER.warning("Image data not found at %s, skipping image features", dataset_image_path)
+        dataset_image = None
+
+    embeddings_path = PROCESSED_DIR / "dataset_image_embeddings.parquet"
+    if embeddings_path.exists():
+        LOGGER.info("Loading precomputed visual embeddings...")
+        image_embeddings = pd.read_parquet(embeddings_path)
+        LOGGER.info("Loaded %d visual embedding rows", len(image_embeddings))
+    else:
+        fallback_path = BASE_DIR / "cache" / "dataset_image_embeddings.parquet"
+        if fallback_path.exists():
+            LOGGER.info("Using fallback embeddings from %s", fallback_path)
+            image_embeddings = pd.read_parquet(fallback_path)
+        else:
+            LOGGER.warning("Visual embeddings not found at %s, proceeding without them", embeddings_path)
+            image_embeddings = None
 
     # Build dataset stats
     dataset_stats = interactions.groupby("dataset_id").agg({
@@ -479,20 +540,29 @@ def main() -> None:
         "weight": "total_weight",
     }).reset_index()
 
-    # Build enhanced features
+    # Build enhanced features (with images!)
     user_features = engine.build_user_features_v2(interactions, user_profile, dataset)
-    dataset_features = engine.build_dataset_features_v2(dataset, dataset_stats, interactions)
+    dataset_features = engine.build_dataset_features_v2(
+        dataset,
+        dataset_stats,
+        interactions,
+        dataset_image,
+        image_embeddings,
+    )
 
     # Save features
     engine.save_features(user_features, dataset_features, interactions, dataset_stats)
 
     # Print summary
     print("\n" + "=" * 80)
-    print("ENHANCED FEATURE ENGINEERING SUMMARY")
+    print("ENHANCED FEATURE ENGINEERING SUMMARY (WITH IMAGE FEATURES!)")
     print("=" * 80)
     print(f"User Features: {len(user_features):,} users × {len(user_features.columns)} features")
     print(f"Dataset Features: {len(dataset_features):,} items × {len(dataset_features.columns)} features")
     print(f"Interactions: {len(interactions):,} records")
+    if dataset_image is not None:
+        print(f"Image Records: {len(dataset_image):,}")
+        print(f"Datasets with images: {dataset_features['has_images'].sum():,} ({100*dataset_features['has_images'].mean():.1f}%)")
     print(f"\nFeature files saved to: {engine.output_dir}")
     print("=" * 80 + "\n")
 

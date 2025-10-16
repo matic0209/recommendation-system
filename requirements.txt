@@ -30,9 +30,15 @@ python-json-logger==2.0.7
 # Phase 2: Data quality and feature engineering
 scipy==1.10.1
 
+# Multimodal feature extraction (CPU friendly)
+Pillow==10.2.0
+torch==2.1.2
+torchvision==0.16.2
+huggingface-hub==0.14.1
+sentence-transformers==2.2.2
+
 # Phase 3: Vector recall & ranking (optional components)
 # Install when USE_FAISS_RECALL=1 or ONNX export is required
 # faiss-cpu==1.7.4
-# sentence-transformers==2.2.2
 lightgbm==4.1.0
 # skl2onnx==1.16.0

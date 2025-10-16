@@ -379,6 +379,81 @@ class MultiChannelRecallEngine:
 
         return results
 
+    def image_richness_recall(
+        self,
+        dataset_features: pd.DataFrame,
+        target_dataset_id: int,
+        exclude_items: Set[int] = None,
+        limit: int = 30,
+    ) -> List[Tuple[int, float]]:
+        """
+        Image richness-based recall: recommend items with similar image quality.
+
+        NEW! This uses image features to find similar items.
+
+        Args:
+            dataset_features: Dataset features with image features
+            target_dataset_id: Target dataset
+            exclude_items: Items to exclude
+            limit: Max items
+
+        Returns:
+            List[(dataset_id, score)]
+        """
+        exclude_items = exclude_items or set()
+
+        # Check if image features exist
+        image_cols = ["image_richness_score", "image_count", "has_images"]
+        if not all(col in dataset_features.columns for col in image_cols):
+            return []
+
+        # Get target features
+        target_row = dataset_features[
+            dataset_features["dataset_id"] == target_dataset_id
+        ]
+
+        if target_row.empty:
+            return []
+
+        target_richness = target_row.iloc[0].get("image_richness_score", 0)
+        target_count = target_row.iloc[0].get("image_count", 0)
+        target_has_images = target_row.iloc[0].get("has_images", 0)
+
+        # If target has no images, recommend items with good images
+        if target_has_images == 0:
+            candidates = dataset_features[
+                (dataset_features["has_images"] == 1) &
+                (dataset_features["image_richness_score"] > 0.5)
+            ].copy()
+        else:
+            # Find items with similar image richness
+            candidates = dataset_features[
+                dataset_features["has_images"] == 1
+            ].copy()
+
+            # Calculate similarity based on image features
+            candidates["image_sim_score"] = 1 / (
+                1 + abs(candidates["image_richness_score"] - target_richness) +
+                abs(candidates["image_count"] - target_count) * 0.1
+            )
+
+            candidates = candidates.sort_values("image_sim_score", ascending=False)
+
+        # Exclude target and filter
+        results = []
+        for _, row in candidates.iterrows():
+            item_id = row["dataset_id"]
+            if item_id in exclude_items or item_id == target_dataset_id:
+                continue
+
+            score = row.get("image_sim_score", row.get("image_richness_score", 0.5))
+            results.append((item_id, float(score)))
+
+            if len(results) >= limit:
+                break
+
+        return results
+
     def multi_channel_recall(
         self,
         target_dataset_id: int,
@@ -500,7 +575,20 @@ class MultiChannelRecallEngine:
                     if price_items:
                         results["price"] = price_items
 
-        # Channel 7: Faiss Vector Recall (high-performance)
+        # Channel 7: Image Richness Recall (NEW!)
+        if dataset_features is not None and not dataset_features.empty:
+            if "image_richness_score" in dataset_features.columns:
+                image_items = self.image_richness_recall(
+                    dataset_features,
+                    target_dataset_id,
+                    exclude_items={target_dataset_id},
+                    limit=limit // 8,
+                )
+                if image_items:
+                    results["image"] = image_items
+                    LOGGER.debug("Image recall: %d items", len(image_items))
+
+        # Channel 8: Faiss Vector Recall (high-performance)
         if self.faiss_vector_recall and self.faiss_vector_recall.index is not None:
             try:
                 faiss_items = self.faiss_vector_recall.search(
@@ -512,12 +600,12 @@ class MultiChannelRecallEngine:
             except Exception as e:
                 LOGGER.warning("Faiss vector recall failed: %s", e)
 
-        # Channel 8: Popular (fallback)
+        # Channel 9: Popular (fallback)
         popular_items = kwargs.get("popular_items", [])
         if popular_items:
             results["popular"] = [
                 (item, 0.01 - idx * 0.0001)
-                for idx, item in enumerate(popular_items[:limit // 7])
+                for idx, item in enumerate(popular_items[:limit // 8])
                 if item != target_dataset_id
             ]
 
@@ -549,6 +637,7 @@ class MultiChannelRecallEngine:
                 "tag": 0.6,
                 "category": 0.4,
                 "price": 0.3,
+                "image": 0.5,  # NEW! Image-based recall
                 "popular": 0.1,
             }
 

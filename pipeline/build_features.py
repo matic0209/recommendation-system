@@ -12,10 +12,19 @@ from typing import Dict
 import numpy as np
 import pandas as pd
 
-from config.settings import DATA_DIR, FEATURE_STORE_PATH
+from config.settings import BASE_DIR, DATA_DIR, FEATURE_STORE_PATH
 from pipeline.data_cleaner import DataCleaner
 from pipeline.build_features_v2 import FeatureEngineV2
 from pipeline.feature_store_redis import RedisFeatureStore
+
+# Optional: Visual image features (requires sentence-transformers)
+try:
+    from pipeline.image_features_visual import VisualImageFeatureExtractor, VisualEmbeddingConfig
+    VISUAL_FEATURES_AVAILABLE = True
+except ImportError:
+    VISUAL_FEATURES_AVAILABLE = False
+    LOGGER = logging.getLogger(__name__)
+    LOGGER.info("Visual image features not available (sentence-transformers not installed)")
 
 LOGGER = logging.getLogger(__name__)
 PROCESSED_DIR = DATA_DIR / "processed"
@@ -137,7 +146,7 @@ def build_dataset_stats(interactions: pd.DataFrame) -> pd.DataFrame:
 def build_dataset_features(dataset_path: Path) -> pd.DataFrame:
     dataset_df = _load_parquet(dataset_path)
     if dataset_df.empty:
-        return pd.DataFrame(columns=["dataset_id", "dataset_name", "description", "tag", "price", "create_company_name"])
+        return pd.DataFrame(columns=["dataset_id", "dataset_name", "description", "tag", "price", "create_company_name", "cover_id", "create_time"])
 
     dataset_df = dataset_df.rename(columns={"id": "dataset_id"})
     columns = [
@@ -147,6 +156,8 @@ def build_dataset_features(dataset_path: Path) -> pd.DataFrame:
         "tag",
         "price",
         "create_company_name",
+        "cover_id",
+        "create_time",
     ]
     existing = [col for col in columns if col in dataset_df.columns]
     result = dataset_df[existing].copy()
@@ -283,6 +294,49 @@ def main() -> None:
     # Recompute dataset stats from cleaned interactions
     cleaned_dataset_stats = build_dataset_stats(cleaned_interactions)
 
+    # Load image data for enhanced features
+    dataset_image_path = business_dir / "dataset_image.parquet"
+    dataset_image = None
+    image_embeddings = pd.DataFrame()
+    embeddings_path = PROCESSED_DIR / "dataset_image_embeddings.parquet"
+    if dataset_image_path.exists():
+        LOGGER.info("Loading dataset images from %s...", dataset_image_path)
+        dataset_image = pd.read_parquet(dataset_image_path)
+        LOGGER.info("Loaded %d image records for feature engineering", len(dataset_image))
+
+        if embeddings_path.exists():
+            LOGGER.info("Using precomputed visual embeddings from %s", embeddings_path)
+            image_embeddings = pd.read_parquet(embeddings_path)
+        elif VISUAL_FEATURES_AVAILABLE:
+            try:
+                visual_cache = BASE_DIR / "cache" / "images"
+                visual_extractor = VisualImageFeatureExtractor(visual_cache, VisualEmbeddingConfig())
+                image_embeddings = visual_extractor.build_dataset_embeddings(dataset_image)
+                try:
+                    image_embeddings.to_parquet(embeddings_path, index=False)
+                    LOGGER.info(
+                        "Saved dataset image embeddings to %s (rows=%d, dim=%d)",
+                        embeddings_path,
+                        len(image_embeddings),
+                        len([c for c in image_embeddings.columns if c.startswith('image_embed_mean_')]),
+                    )
+                except PermissionError:
+                    fallback_path = BASE_DIR / "cache" / "dataset_image_embeddings.parquet"
+                    fallback_path.parent.mkdir(parents=True, exist_ok=True)
+                    image_embeddings.to_parquet(fallback_path, index=False)
+                    LOGGER.warning(
+                        "Unable to write embeddings to %s due to permissions; saved to %s instead",
+                        embeddings_path,
+                        fallback_path,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.warning("Visual embedding extraction failed; continuing without embeddings: %s", exc)
+                image_embeddings = pd.DataFrame()
+        else:
+            LOGGER.info("Visual embedding extraction skipped (dependencies not available)")
+    else:
+        LOGGER.warning("Image data not found at %s, skipping image features", dataset_image_path)
+
     user_features_v2 = engine.build_user_features_v2(
         cleaned_interactions,
         cleaned_user_profile,
@@ -292,6 +346,8 @@ def main() -> None:
         cleaned_dataset,
         cleaned_dataset_stats,
         cleaned_interactions,
+        dataset_image,
+        image_embeddings,
     )
 
     engine.save_features(

@@ -125,7 +125,6 @@ class DatabaseManager:
             interactions.source,
             items.title,
             items.price AS item_price,
-            items.type_name,
             users.user_name,
             users.company_name
         FROM ({self._interaction_subquery()}) interactions
@@ -133,10 +132,8 @@ class DatabaseManager:
             SELECT
                 d.id                         AS item_id,
                 d.dataset_name               AS title,
-                d.price                      AS price,
-                dict_table.data_value        AS type_name
+                d.price                      AS price
             FROM dataset d
-            LEFT JOIN dict dict_table ON dict_table.id = d.type_id
             WHERE d.is_delete = 0
         ) items ON interactions.item_id = items.item_id
         LEFT JOIN (
@@ -221,7 +218,6 @@ class DatabaseManager:
             d.intro                          AS intro,
             d.tag                            AS tag,
             d.type_id                        AS type_id,
-            dict_table.data_value            AS type_name,
             d.data_format                    AS data_format,
             d.pattern                        AS file_pattern,
             d.price                          AS price,
@@ -243,7 +239,6 @@ class DatabaseManager:
                 LIMIT 1
             )                                AS cover_image
         FROM dataset d
-        LEFT JOIN dict dict_table ON dict_table.id = d.type_id
         WHERE d.is_delete = 0
         """
 
@@ -278,13 +273,8 @@ class DatabaseManager:
             u.country            AS country,
             u.sex                AS sex,
             u.last_login_time    AS last_login_time,
-            u.create_time        AS create_time,
-            c.industry           AS company_industry,
-            c.address            AS company_address,
-            c.website            AS company_website,
-            c.status             AS company_status
+            u.create_time        AS create_time
         FROM user u
-        LEFT JOIN company c ON u.company_id = c.id
         WHERE u.is_valid = 1
         """
 

@@ -7,6 +7,7 @@
 ## 1. 功能概览
 
 - **离线流水线**：支持 CDC 增量抽取、数据清洗、增强特征（>70 个特征），并输出 Prometheus 质量快照。
+- **多模态特征**：新增基于 CLIP 的图片向量抽取（CPU 友好），自动融合文本与视觉信号。
 - **多模型召回**：行为协同过滤、内容向量、标签/行业/价格、UserCF、Faiss（可选）等多路召回。
 - **LightGBM 排序**：基于增强特征训练 LightGBM 排序模型，自动导出 Pickle+ONNX。
 - **在线 API**：FastAPI + 异步调用，内置线程池隔离、分阶段超时、熔断与多级降级（Redis → 预计算 → 热门）。
@@ -66,6 +67,9 @@ scripts/run_pipeline.sh --sync-only
 - 质量报告：`data/evaluation/data_quality_report_v2.json` + `data_quality_report.html`
 - Prometheus 快照：`data/evaluation/data_quality_metrics.prom`
 - 模型与召回索引：`models/*.pkl / .json / rank_model.onnx`
+- 图片向量缓存：`data/processed/dataset_image_embeddings.parquet`（如遇写权限限制会自动回退到 `cache/dataset_image_embeddings.parquet`）
+
+Airflow 中的 `recommendation_pipeline` DAG 已增加 `image_embeddings → build_features → train_models` 链路，保证图片向量在特征构建前生成，并由 MLflow 记录多模态指标（使用的模态数、向量维度、融合权重等）。
 
 ---
 
@@ -100,16 +104,35 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 ## 4. 文档索引
 
+### 核心文档（必读）
+
+- `QUICKSTART.md`：快速开始指南，Docker/K8s 部署流程
 - `docs/ARCHITECTURE.md`：总体架构设计与组件关系
+- `docs/DEVELOPER_GUIDE.md`：开发规范、目录结构与代码风格
+
+### 功能文档
+
 - `docs/PIPELINE_OVERVIEW.md`：离线流水线与特征描述
 - `docs/FASTAPI_SERVICE.md`：在线服务实现细节与扩展点
-- `docs/PROJECT_OPTIMIZATION.md`：整体优化成果回顾与后续规划
+- `docs/API_REFERENCE.md`：API 接口详细说明
 - `docs/MODEL_CICD.md`：模型训练、版本管理与灰度策略
 - `docs/HOT_RELOAD.md`：热更新流程与常见问题
-- `docs/MATOMO_EVALUATION.md`：行为日志对齐与效果评估方法
+
+### 运维文档
+
 - `docs/OPERATIONS_SOP.md`：运维手册、故障演练与告警处置
-- `docs/DEVELOPER_GUIDE.md`：开发规范、目录结构与代码风格
-- `docs/PRODUCTION_UPGRADE_PLAN.md`：整体升级成果与里程碑总结
+- `docs/DEPLOYMENT_GUIDE.md`：生产环境部署指南
+- `docs/DATABASE_INDEX_SETUP.md`：数据库索引优化指南
+
+### 优化与评估
+
+- `docs/PROJECT_OPTIMIZATION.md`：整体优化成果回顾
+- `docs/OPTIMIZATION_TRACKER.md`：优化进度追踪
+- `docs/P0_OPTIMIZATION_GUIDE.md`：P0 优化执行指南
+- `docs/P0_EXECUTION_REPORT.md`：P0 优化执行报告
+- `docs/PRODUCTION_OPTIMIZATION_TODO.md`：生产优化 TODO 清单
+- `docs/MATOMO_EVALUATION.md`：行为日志对齐与效果评估
+- `docs/AUTO_RELEASE_PIPELINE.md`：自动发布流水线
 
 所有文档已统一为中文，并描述当前最终实现。
 
