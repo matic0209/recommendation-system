@@ -109,9 +109,72 @@ open /Applications/Docker.app
 
 ---
 
-## 二、数据库准备
+## 二、数据源准备
 
-### 2.1 业务数据库（必需）
+### 📌 重要说明
+
+系统支持两种数据源模式：
+
+1. **JSON文件模式**（推荐）：从JSON文件读取业务数据
+2. **数据库模式**：从MySQL数据库实时查询
+
+**选择建议：**
+- 如果已有JSON数据导出，推荐使用JSON模式（无需数据库连接）
+- 如果需要实时数据，使用数据库模式
+
+### 2.1 数据源模式一：JSON文件（推荐）
+
+**配置方式：**
+
+编辑`.env`文件：
+```ini
+# 数据源配置
+DATA_SOURCE=json
+DATA_JSON_DIR=/path/to/json/data
+```
+
+**JSON文件要求：**
+
+1. **文件命名规范：**
+   - 全量文件：`{table_name}.json`（如 `user.json`, `dataset.json`）
+   - 增量文件：`{table_name}_YYYYMMDD_HHMMSS.json`（如 `user_20251016_140000.json`）
+
+2. **必需的表文件：**
+   - `user.json` - 用户表
+   - `dataset.json` - 数据集表
+   - `task.json` - 任务订单表
+   - `api_order.json` - API订单表
+   - `dataset_image.json` - 数据集图片表
+
+3. **JSON格式：**
+   ```json
+   [
+     {
+       "id": 1,
+       "user_name": "张三",
+       "update_time": "2025-10-16T14:00:00"
+     }
+   ]
+   ```
+
+**详细文档：** 参见 [`docs/JSON_DATA_SOURCE.md`](JSON_DATA_SOURCE.md)
+
+### 2.2 数据源模式二：MySQL数据库
+
+**仅在DATA_SOURCE=database时需要配置**
+
+编辑`.env`文件：
+```ini
+# 数据源配置
+DATA_SOURCE=database
+
+# 数据库连接
+BUSINESS_DB_HOST=127.0.0.1
+BUSINESS_DB_PORT=3306
+BUSINESS_DB_NAME=dianshu_backend
+BUSINESS_DB_USER=root
+BUSINESS_DB_PASSWORD=your_password
+```
 
 **数据库名称：** `dianshu_backend`
 
