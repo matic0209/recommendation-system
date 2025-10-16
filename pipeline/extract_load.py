@@ -148,12 +148,20 @@ def _format_partition_name() -> str:
 def _update_watermark(frame: pd.DataFrame, column: str) -> Optional[str]:
     if frame.empty or column not in frame.columns:
         return None
-    value = frame[column].max()
-    if pd.isna(value):
-        return None
-    if isinstance(value, (pd.Timestamp, datetime)):
+
+    # Convert to datetime first, handling mixed types
+    try:
+        time_series = pd.to_datetime(frame[column], errors='coerce')
+        value = time_series.max()
+        if pd.isna(value):
+            return None
         return value.isoformat()
-    return str(value)
+    except Exception:
+        # Fallback to string comparison if datetime conversion fails
+        value = frame[column].astype(str).max()
+        if pd.isna(value) or value == 'nan':
+            return None
+        return str(value)
 
 
 def _write_parquet_chunk(path: Path, chunk: pd.DataFrame, *, writer_state: dict) -> None:
@@ -177,13 +185,14 @@ def _append_parquet_chunk(path: Path, chunk: pd.DataFrame, *, schema_cache: dict
         if path.exists():
             schema = pq.read_schema(str(path))
         else:
-            table = pa.Table.from_pandas(chunk, preserve_index=False)
-            pq.write_table(table, str(path))
-            schema_cache[path] = table.schema
-            return
+            schema = pa.Table.from_pandas(chunk, preserve_index=False).schema
         schema_cache[path] = schema
+
     table = pa.Table.from_pandas(chunk, schema=schema, preserve_index=False)
-    pq.write_table(table, str(path), append=True)
+    if path.exists():
+        existing = pq.read_table(str(path))
+        table = pa.concat_tables([existing, table], promote=True)
+    pq.write_table(table, str(path))
 
 
 def _close_writers(writer_state: dict) -> None:

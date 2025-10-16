@@ -10,7 +10,7 @@ services:
     container_name: redis
     command: redis-server --appendonly yes --maxmemory 2gb --maxmemory-policy allkeys-lru
     ports:
-      - "6379:6379"
+      - "${REDIS_HOST_PORT:-6379}:6379"
     volumes:
       - redis-data:/data
     healthcheck:
@@ -32,7 +32,7 @@ services:
       - mlflow-data:/mlflow
     command: mlflow server --host 0.0.0.0 --port 5000 --serve-artifacts --artifacts-destination /mlflow/artifacts
     ports:
-      - "5000:5000"
+      - "${MLFLOW_HOST_PORT:-5000}:5000"
     networks:
       - recommend-net
 
@@ -52,7 +52,7 @@ services:
       - ./models:/app/models
       - ./logs:/app/logs
     ports:
-      - "8000:8000"
+      - "${RECOMMEND_API_HOST_PORT:-8000}:8000"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
@@ -140,7 +140,7 @@ services:
       - ./airflow/plugins:/opt/airflow/plugins
       - mlflow-data:/mlflow
     ports:
-      - "8080:8080"
+      - "${AIRFLOW_WEB_HOST_PORT:-8080}:8080"
     command: webserver
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -187,7 +187,7 @@ services:
       - "--config.file=/etc/prometheus/prometheus.yml"
       - "--storage.tsdb.path=/prometheus"
     ports:
-      - "9090:9090"
+      - "${PROMETHEUS_HOST_PORT:-9090}:9090"
     networks:
       - recommend-net
 
@@ -199,7 +199,7 @@ services:
     command:
       - "--config.file=/etc/alertmanager/alertmanager.yml"
     ports:
-      - "9093:9093"
+      - "${ALERTMANAGER_HOST_PORT:-9093}:9093"
     networks:
       - recommend-net
 
@@ -214,10 +214,26 @@ services:
       - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards
       - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources
     ports:
-      - "3000:3000"
+      - "${GRAFANA_HOST_PORT:-3000}:3000"
     depends_on:
       - prometheus
       - alertmanager
+    networks:
+      - recommend-net
+
+  notification-gateway:
+    build:
+      context: ./notification_gateway
+      dockerfile: Dockerfile
+    container_name: notification-gateway
+    <<: *default-env
+    environment:
+      WEIXIN_CORP_ID: ${WEIXIN_CORP_ID}
+      WEIXIN_CORP_SECRET: ${WEIXIN_CORP_SECRET}
+      WEIXIN_AGENT_ID: ${WEIXIN_AGENT_ID:-1000019}
+      WEIXIN_DEFAULT_USER: ${WEIXIN_DEFAULT_USER:-ZhangJinBo}
+    ports:
+      - "${NOTIFICATION_GATEWAY_HOST_PORT:-9000}:9000"
     networks:
       - recommend-net
 
