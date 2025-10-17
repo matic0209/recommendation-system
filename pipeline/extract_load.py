@@ -4,8 +4,8 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import time
 import os
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,13 +17,16 @@ import pyarrow.parquet as pq
 from sqlalchemy import create_engine, inspect
 from sqlalchemy.exc import DBAPIError, OperationalError
 
-from config.settings import DATA_DIR, DatabaseConfig, load_database_configs
+from config.settings import (
+    DATA_DIR,
+    DATA_JSON_DIR,
+    DATA_SOURCE,
+    SOURCE_DATA_MODES,
+    DatabaseConfig,
+    load_database_configs,
+)
 
 LOGGER = logging.getLogger(__name__)
-
-# Data source configuration
-DATA_SOURCE = os.getenv("DATA_SOURCE", "json")  # 'json' or 'database'
-DATA_JSON_DIR = Path(os.getenv("DATA_JSON_DIR", "/home/ubuntu/recommend/data/dianshu_data"))
 
 DEFAULT_TABLES: Dict[str, tuple[str, ...]] = {
     "business": (
@@ -534,20 +537,19 @@ def extract_all(dry_run: bool = True, full_refresh: bool = False) -> None:
         "tables": [],
     }
 
-    LOGGER.info("Data source mode: %s", DATA_SOURCE)
+    LOGGER.info("Default data source mode: %s", DATA_SOURCE)
 
-    if DATA_SOURCE == "json":
-        # JSON file data source
-        if not DATA_JSON_DIR.exists():
-            LOGGER.error("JSON data directory not found: %s", DATA_JSON_DIR)
-            raise FileNotFoundError(f"JSON data directory not found: {DATA_JSON_DIR}")
+    configs = None
+    for source, tables in DEFAULT_TABLES.items():
+        mode = SOURCE_DATA_MODES.get(source, DATA_SOURCE)
+        LOGGER.info("Source '%s' configured for mode: %s", source, mode)
 
-        LOGGER.info("Using JSON data source from: %s", DATA_JSON_DIR)
-
-        for source, tables in DEFAULT_TABLES.items():
-            # Only process 'business' source for JSON (matomo not available)
+        if mode == "json":
+            if not DATA_JSON_DIR.exists():
+                LOGGER.error("JSON data directory not found: %s", DATA_JSON_DIR)
+                raise FileNotFoundError(f"JSON data directory not found: {DATA_JSON_DIR}")
             if source != "business":
-                LOGGER.info("Skipping source '%s' (not available in JSON mode)", source)
+                LOGGER.warning("Skipping source '%s' because JSON mode is not supported for it", source)
                 continue
 
             output_dir = DATA_DIR / source
@@ -575,11 +577,9 @@ def extract_all(dry_run: bool = True, full_refresh: bool = False) -> None:
                         "watermark": result.watermark,
                     }
                 )
-    else:
-        # Database data source
-        configs = load_database_configs()
-
-        for source, tables in DEFAULT_TABLES.items():
+        elif mode == "database":
+            if configs is None:
+                configs = load_database_configs()
             config = configs[source]
             output_dir = DATA_DIR / source
             _ensure_dir(output_dir)
@@ -608,6 +608,8 @@ def extract_all(dry_run: bool = True, full_refresh: bool = False) -> None:
                         "watermark": result.watermark,
                     }
                 )
+        else:
+            LOGGER.warning("Unknown mode '%s' for source '%s'; skipping", mode, source)
 
     run_metrics["finished_at"] = datetime.now(timezone.utc).isoformat()
     metrics_log.append(run_metrics)

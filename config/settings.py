@@ -19,6 +19,13 @@ MLFLOW_TRACKING_URI: str = os.getenv("MLFLOW_TRACKING_URI", f"file://{MLFLOW_DIR
 MLFLOW_EXPERIMENT_NAME: str = os.getenv("MLFLOW_EXPERIMENT_NAME", "dataset_recommendation")
 MODEL_REGISTRY_PATH: Path = MODELS_DIR / "model_registry.json"
 
+DATA_SOURCE: str = os.getenv("DATA_SOURCE", "json").lower()
+DATA_JSON_DIR: Path = Path(os.getenv("DATA_JSON_DIR", DATA_DIR / "dianshu_data"))
+SOURCE_DATA_MODES: Dict[str, str] = {
+    "business": os.getenv("BUSINESS_DATA_SOURCE", DATA_SOURCE).lower(),
+    "matomo": os.getenv("MATOMO_DATA_SOURCE", os.getenv("MATOMO_SOURCE", DATA_SOURCE)).lower(),
+}
+
 
 @dataclass
 class DatabaseConfig:
@@ -79,6 +86,9 @@ __all__ = [
     "BASE_DIR",
     "DATA_DIR",
     "MODELS_DIR",
+    "DATA_SOURCE",
+    "DATA_JSON_DIR",
+    "SOURCE_DATA_MODES",
     "FEATURE_STORE_PATH",
     "MLFLOW_DIR",
     "MLFLOW_TRACKING_URI",

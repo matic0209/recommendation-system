@@ -22,7 +22,8 @@ cp .env.example .env.prod
 
 | 配置项 | 说明 |
 | ------ | ---- |
-| `DATA_JSON_DIR` | 宿主机 JSON 数据目录绝对路径，例如 `/data/dianshu_data` |
+| `DATA_SOURCE` / `BUSINESS_DATA_SOURCE` / `MATOMO_DATA_SOURCE` | 控制每个来源的数据模式，支持业务用 JSON、Matomo 用数据库的混合场景 |
+| `DATA_JSON_DIR` | 当业务使用 JSON 时的宿主机目录，例如 `/data/dianshu_data` |
 | `MLFLOW_TRACKING_URI` | 建议设为 `file://./mlruns`（默认值即可） |
 | `RECOMMEND_API_HOST_PORT` 等端口变量 | 见下一节，务必分配不冲突的端口 |
 | 企业微信变量 | 如需通知功能，填写正式的企业微信凭据 |
@@ -41,6 +42,20 @@ REDIS_HOST_PORT=16379
 ```
 
 如需进一步隔离，可结合防火墙或 Nginx/Traefik 仅对外暴露必要端口（通常只有推荐 API）。
+
+若需要业务 JSON + Matomo 数据库的混合模式，可在 `.env.prod` 中设置：
+
+```ini
+DATA_SOURCE=json
+BUSINESS_DATA_SOURCE=json
+MATOMO_DATA_SOURCE=database
+MATOMO_DB_HOST=host.docker.internal   # 或内网 IP
+MATOMO_DB_PORT=3306
+MATOMO_DB_USER=matomo_user
+MATOMO_DB_PASSWORD=******
+```
+
+确保 Matomo MySQL 对容器可达（监听 0.0.0.0 或绑定到宿主机内网地址）。
 
 ---
 
