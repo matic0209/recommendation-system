@@ -261,7 +261,7 @@ def _prepare_ranking_dataset(
         if col in merged.columns
     ]
     feature_columns.extend(optional_columns)
-    features = merged[feature_columns].fillna(0.0)
+    features = merged[feature_columns].replace([np.inf, -np.inf], np.nan).fillna(0.0)
     target = (merged["interaction_count"] > 0).astype(int)
     meta = merged[["dataset_id"]].reset_index(drop=True)
 

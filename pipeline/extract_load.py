@@ -13,6 +13,7 @@ from typing import Dict, Iterable, Optional
 
 import pandas as pd
 from pandas.api.types import is_object_dtype, is_string_dtype
+import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 from sqlalchemy import create_engine, inspect
@@ -158,6 +159,8 @@ def _apply_json_type_conversions(table: str, frame: pd.DataFrame) -> pd.DataFram
             result[column] = pd.to_datetime(result[column], errors="coerce")
         elif target_type == "float":
             result[column] = pd.to_numeric(result[column], errors="coerce")
+        if target_type in {"datetime", "float"}:
+            result[column] = result[column].replace([np.inf, -np.inf], pd.NA)
     return result
 
 
