@@ -152,7 +152,7 @@ sources:
           type: integer
           nullable: false
     matomo_log_conversion:
-      primary_key: [idvisit]
+      primary_key: [idvisit, idgoal, buster]
       required_columns:
         idvisit:
           type: integer

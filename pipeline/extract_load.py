@@ -45,6 +45,34 @@ DEFAULT_TABLES: Dict[str, tuple[str, ...]] = {
     ),
 }
 
+JSON_TYPE_CONVERSIONS: Dict[str, Dict[str, str]] = {
+    "user": {
+        "create_time": "datetime",
+        "last_login_time": "datetime",
+    },
+    "dataset": {
+        "price": "float",
+        "create_time": "datetime",
+        "update_time": "datetime",
+    },
+    "task": {
+        "price": "float",
+        "create_time": "datetime",
+        "update_time": "datetime",
+    },
+    "api_order": {
+        "price": "float",
+        "api_price": "float",
+        "create_time": "datetime",
+        "update_time": "datetime",
+        "pay_time": "datetime",
+    },
+    "dataset_image": {
+        "create_time": "datetime",
+        "update_time": "datetime",
+    },
+}
+
 INCREMENTAL_CANDIDATES: Dict[str, tuple[str, ...]] = {
     "user": ("update_time", "modify_time", "create_time"),
     "dataset": ("update_time", "modify_time", "create_time"),
@@ -112,6 +140,24 @@ def _coerce_frame_to_schema(frame: pd.DataFrame, schema: pa.Schema) -> pd.DataFr
             if not (is_object_dtype(series.dtype) or is_string_dtype(series.dtype)):
                 result[name] = series.astype("string")
             result[name] = result[name].where(~result[name].isna(), None)
+    return result
+
+
+def _apply_json_type_conversions(table: str, frame: pd.DataFrame) -> pd.DataFrame:
+    """Apply table-specific type conversions for JSON extracted data."""
+    if frame.empty:
+        return frame
+    conversions = JSON_TYPE_CONVERSIONS.get(table)
+    if not conversions:
+        return frame
+    result = frame.copy()
+    for column, target_type in conversions.items():
+        if column not in result.columns:
+            continue
+        if target_type == "datetime":
+            result[column] = pd.to_datetime(result[column], errors="coerce")
+        elif target_type == "float":
+            result[column] = pd.to_numeric(result[column], errors="coerce")
     return result
 
 
@@ -360,6 +406,7 @@ def _export_table_from_json(
 
                 # Convert to DataFrame
                 df = pd.DataFrame(data)
+                df = _apply_json_type_conversions(table, df)
                 if df.empty:
                     continue
 
