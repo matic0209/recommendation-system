@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Dict, Iterable, Optional
 
 import pandas as pd
+from pandas.api.types import is_object_dtype, is_string_dtype
 import pyarrow as pa
 import pyarrow.parquet as pq
 from sqlalchemy import create_engine, inspect
@@ -95,6 +96,23 @@ def _normalize_arrow_table(table: pa.Table) -> pa.Table:
             arrays.append(column)
             fields.append(field)
     return pa.Table.from_arrays(arrays, schema=pa.schema(fields))
+
+
+def _coerce_frame_to_schema(frame: pd.DataFrame, schema: pa.Schema) -> pd.DataFrame:
+    """Coerce DataFrame columns to satisfy an Arrow schema (currently string promotion)."""
+    if frame.empty:
+        return frame
+    result = frame.copy()
+    for field in schema:
+        name = field.name
+        if name not in result.columns:
+            continue
+        series = result[name]
+        if pa.types.is_string(field.type):
+            if not (is_object_dtype(series.dtype) or is_string_dtype(series.dtype)):
+                result[name] = series.astype("string")
+            result[name] = result[name].where(~result[name].isna(), None)
+    return result
 
 
 def _load_state() -> Dict[str, Dict[str, Dict[str, str]]]:
@@ -196,7 +214,8 @@ def _write_parquet_chunk(path: Path, chunk: pd.DataFrame, *, writer_state: dict)
         writer_state[path] = pq.ParquetWriter(str(path), table.schema)
         writer = writer_state[path]
     else:
-        table = pa.Table.from_pandas(chunk, schema=writer.schema, preserve_index=False)
+        coerced = _coerce_frame_to_schema(chunk, writer.schema)
+        table = pa.Table.from_pandas(coerced, schema=writer.schema, preserve_index=False)
     writer.write_table(table)
 
 
@@ -216,7 +235,8 @@ def _append_parquet_chunk(path: Path, chunk: pd.DataFrame, *, schema_cache: dict
             return
         schema_cache[path] = schema
 
-    table = pa.Table.from_pandas(chunk, schema=schema, preserve_index=False)
+    coerced = _coerce_frame_to_schema(chunk, schema)
+    table = pa.Table.from_pandas(coerced, schema=schema, preserve_index=False)
     table = _normalize_arrow_table(table)
     if path.exists():
         existing = pq.read_table(str(path))
