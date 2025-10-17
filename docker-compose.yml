@@ -93,6 +93,7 @@ services:
     volumes:
       - .:/opt/recommend
       - mlflow-data:/mlflow
+      - /dianshu/backup/data/dianshu_data/jsons:/dianshu/backup/data/dianshu_data/jsons:ro
     networks:
       - recommend-net
 
@@ -139,6 +140,7 @@ services:
       - ./airflow/logs:/opt/airflow/logs
       - ./airflow/plugins:/opt/airflow/plugins
       - mlflow-data:/mlflow
+      - /dianshu/backup/data/dianshu_data/jsons:/dianshu/backup/data/dianshu_data/jsons:ro
     ports:
       - "${AIRFLOW_WEB_HOST_PORT:-8080}:8080"
     command: webserver
@@ -171,6 +173,7 @@ services:
       - ./airflow/dags:/opt/airflow/dags
       - ./airflow/logs:/opt/airflow/logs
       - ./airflow/plugins:/opt/airflow/plugins
+      - /dianshu/backup/data/dianshu_data/jsons:/dianshu/backup/data/dianshu_data/jsons:ro
     command: scheduler
     extra_hosts:
       - "host.docker.internal:host-gateway"
