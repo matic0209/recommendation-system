@@ -79,6 +79,24 @@ def _ensure_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
 
 
+def _normalize_arrow_table(table: pa.Table) -> pa.Table:
+    """Promote null-typed columns to string so later chunks with values still match schema."""
+    if not any(pa.types.is_null(field.type) for field in table.schema):
+        return table
+
+    arrays: list[pa.Array] = []
+    fields: list[pa.Field] = []
+    for field, column in zip(table.schema, table.itercolumns()):
+        if pa.types.is_null(field.type):
+            data = column.to_pylist()
+            arrays.append(pa.array(data, type=pa.string()))
+            fields.append(pa.field(field.name, pa.string()))
+        else:
+            arrays.append(column)
+            fields.append(field)
+    return pa.Table.from_arrays(arrays, schema=pa.schema(fields))
+
+
 def _load_state() -> Dict[str, Dict[str, Dict[str, str]]]:
     if not STATE_PATH.exists():
         return {}
@@ -171,11 +189,14 @@ def _write_parquet_chunk(path: Path, chunk: pd.DataFrame, *, writer_state: dict)
     """Write dataframe chunk to parquet file, creating writer lazily."""
     if chunk.empty:
         return
-    table = pa.Table.from_pandas(chunk, preserve_index=False)
     writer = writer_state.get(path)
     if writer is None:
+        table = pa.Table.from_pandas(chunk, preserve_index=False)
+        table = _normalize_arrow_table(table)
         writer_state[path] = pq.ParquetWriter(str(path), table.schema)
         writer = writer_state[path]
+    else:
+        table = pa.Table.from_pandas(chunk, schema=writer.schema, preserve_index=False)
     writer.write_table(table)
 
 
@@ -188,10 +209,15 @@ def _append_parquet_chunk(path: Path, chunk: pd.DataFrame, *, schema_cache: dict
         if path.exists():
             schema = pq.read_schema(str(path))
         else:
-            schema = pa.Table.from_pandas(chunk, preserve_index=False).schema
+            table = pa.Table.from_pandas(chunk, preserve_index=False)
+            table = _normalize_arrow_table(table)
+            pq.write_table(table, str(path))
+            schema_cache[path] = table.schema
+            return
         schema_cache[path] = schema
 
     table = pa.Table.from_pandas(chunk, schema=schema, preserve_index=False)
+    table = _normalize_arrow_table(table)
     if path.exists():
         existing = pq.read_table(str(path))
         table = pa.concat_tables([existing, table], promote=True)
