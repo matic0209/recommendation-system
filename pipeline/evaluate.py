@@ -221,6 +221,13 @@ def _load_exposure_log() -> pd.DataFrame:
     return df
 
 
+def _normalize_timestamps(series: pd.Series) -> pd.Series:
+    if series.empty:
+        return series
+    ts = pd.to_datetime(series, errors="coerce", utc=True)
+    return ts.dt.tz_localize(None)
+
+
 def _compute_exposure_metrics(
     exposures: pd.DataFrame,
     actions: pd.DataFrame,
@@ -234,19 +241,23 @@ def _compute_exposure_metrics(
         return {}
 
     exposures["algorithm_version"] = exposures["algorithm_version"].fillna("unknown")
-    exposures["timestamp"] = pd.to_datetime(exposures["timestamp"], errors="coerce")
-    exposures["timestamp"] = exposures["timestamp"].fillna(exposures["timestamp"].min())
-
+    exposures["timestamp"] = _normalize_timestamps(exposures["timestamp"])
     start_time = exposures["timestamp"].min()
+    if pd.isna(start_time):
+        start_time = None
+    else:
+        exposures["timestamp"] = exposures["timestamp"].fillna(start_time)
 
     if not actions.empty:
-        actions["server_time"] = pd.to_datetime(actions["server_time"], errors="coerce")
+        actions["server_time"] = _normalize_timestamps(actions["server_time"])
         actions = actions.dropna(subset=["server_time"])
-        actions = actions[actions["server_time"] >= start_time]
+        if start_time is not None:
+            actions = actions[actions["server_time"] >= start_time]
     if not conversions.empty:
-        conversions["server_time"] = pd.to_datetime(conversions["server_time"], errors="coerce")
+        conversions["server_time"] = _normalize_timestamps(conversions["server_time"])
         conversions = conversions.dropna(subset=["server_time"])
-        conversions = conversions[conversions["server_time"] >= start_time]
+        if start_time is not None:
+            conversions = conversions[conversions["server_time"] >= start_time]
 
     exposures_by_version = (
         exposures.groupby(["algorithm_version", "dataset_id"]).agg(
@@ -356,12 +367,20 @@ def _load_raw_features() -> pd.DataFrame:
     if not path.exists():
         return pd.DataFrame()
     frame = pd.read_parquet(path)
-    columns = [col for col in ["dataset_id", "price", "description", "tag"] if col in frame.columns]
+    base_columns = ["dataset_id", "price", "description", "tag"]
+    optional_columns = [
+        col
+        for col in ["image_richness_score", "image_embed_norm", "has_images", "has_cover"]
+        if col in frame.columns
+    ]
+    columns = [col for col in base_columns + optional_columns if col in frame.columns]
     subset = frame[columns].copy()
     subset["dataset_id"] = pd.to_numeric(subset.get("dataset_id"), errors="coerce").fillna(0).astype(int)
     subset["price"] = pd.to_numeric(subset.get("price"), errors="coerce").fillna(0.0)
     subset["description"] = subset.get("description", "").fillna("").astype(str)
     subset["tag"] = subset.get("tag", "").fillna("").astype(str)
+    for col in optional_columns:
+        subset[col] = pd.to_numeric(subset.get(col), errors="coerce").fillna(0.0)
     return subset
 
 
@@ -410,6 +429,12 @@ def _compute_ranking_features(
         lambda text: float(len([t for t in text.split(';') if t.strip()])) if isinstance(text, str) else 0.0
     )
 
+    optional_columns = [
+        col
+        for col in ["image_richness_score", "image_embed_norm", "has_images", "has_cover"]
+        if col in base.columns
+    ]
+
     if dataset_stats.empty:
         stats = pd.DataFrame(index=dataset_ids)
         stats["interaction_count"] = 0.0
@@ -425,6 +450,8 @@ def _compute_ranking_features(
     features["tag_count"] = base["tag_count"].fillna(0.0)
     features["weight_log"] = np.log1p(stats["total_weight"].clip(lower=0.0))
     features["interaction_count"] = stats["interaction_count"].fillna(0.0)
+    for col in optional_columns:
+        features[col] = pd.to_numeric(base[col], errors="coerce").fillna(0.0)
     return features
 
 
