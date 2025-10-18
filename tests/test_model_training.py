@@ -59,17 +59,18 @@ def test_behavior_similarity_generates_neighbors():
 
 def test_content_similarity_matrix_shape_matches_items():
     dataset_features = _sample_dataset_features()
-    content_map, matrix, item_ids = train_content_similarity(dataset_features)
+    content_map, matrix, item_ids, meta = train_content_similarity(dataset_features)
     assert content_map
     assert matrix.shape[0] == matrix.shape[1] == len(item_ids)
     # Ensure vector similarity bonds exist for finance items
     neighbours = content_map[101]
     assert 102 in neighbours and neighbours[102] > 0
+    assert isinstance(meta, dict)
 
 
 def test_vector_recall_top_k_limit():
     dataset_features = _sample_dataset_features()
-    _, sim_matrix, item_ids = train_content_similarity(dataset_features)
+    _, sim_matrix, item_ids, _ = train_content_similarity(dataset_features)
     top_k = min(2, VECTOR_RECALL_K)
     neighbors = build_vector_recall(sim_matrix, item_ids, top_k)
     assert neighbors
