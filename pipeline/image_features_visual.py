@@ -4,7 +4,8 @@ from __future__ import annotations
 import hashlib
 import logging
 import time
-from dataclasses import dataclass
+import os
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
@@ -22,7 +23,7 @@ LOGGER = logging.getLogger(__name__)
 class VisualEmbeddingConfig:
     """Configuration for the visual embedding extractor."""
 
-    model_name: str = "clip-ViT-B-32"
+    model_name: str = field(default_factory=lambda: os.getenv("CLIP_MODEL_PATH", "clip-ViT-B-32"))
     device: str = "cpu"
     batch_size: int = 8
     max_images_per_item: int = 4
