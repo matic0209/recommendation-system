@@ -50,6 +50,8 @@ services:
       SENTENCE_TRANSFORMERS_HOME: /opt/recommend/cache/sentence-transformers
       HF_HOME: /opt/recommend/cache/huggingface
       TRANSFORMERS_CACHE: /opt/recommend/cache/huggingface/hub
+      CLIP_MODEL_PATH: /opt/recommend/cache/sentence-transformers/clip-ViT-B-32
+      HF_HUB_OFFLINE: "1"
     volumes:
       - ./data:/app/data
       - ./models:/app/models
@@ -93,6 +95,8 @@ services:
       SENTENCE_TRANSFORMERS_HOME: /opt/recommend/cache/sentence-transformers
       HF_HOME: /opt/recommend/cache/huggingface
       TRANSFORMERS_CACHE: /opt/recommend/cache/huggingface/hub
+      CLIP_MODEL_PATH: /opt/recommend/cache/sentence-transformers/clip-ViT-B-32
+      HF_HUB_OFFLINE: "1"
     depends_on:
       postgres-airflow:
         condition: service_healthy
@@ -147,6 +151,8 @@ services:
       SENTENCE_TRANSFORMERS_HOME: /opt/recommend/cache/sentence-transformers
       HF_HOME: /opt/recommend/cache/huggingface
       TRANSFORMERS_CACHE: /opt/recommend/cache/huggingface/hub
+      CLIP_MODEL_PATH: /opt/recommend/cache/sentence-transformers/clip-ViT-B-32
+      HF_HUB_OFFLINE: "1"
     volumes:
       - .:/opt/recommend
       - ./airflow/dags:/opt/airflow/dags
@@ -185,6 +191,8 @@ services:
       SENTENCE_TRANSFORMERS_HOME: /opt/recommend/cache/sentence-transformers
       HF_HOME: /opt/recommend/cache/huggingface
       TRANSFORMERS_CACHE: /opt/recommend/cache/huggingface/hub
+      CLIP_MODEL_PATH: /opt/recommend/cache/sentence-transformers/clip-ViT-B-32
+      HF_HUB_OFFLINE: "1"
     volumes:
       - mlflow-data:/mlflow
       - .:/opt/recommend
@@ -258,6 +266,8 @@ services:
       SENTENCE_TRANSFORMERS_HOME: /opt/recommend/cache/sentence-transformers
       HF_HOME: /opt/recommend/cache/huggingface
       TRANSFORMERS_CACHE: /opt/recommend/cache/huggingface/hub
+      CLIP_MODEL_PATH: /opt/recommend/cache/sentence-transformers/clip-ViT-B-32
+      HF_HUB_OFFLINE: "1"
     ports:
       - "${NOTIFICATION_GATEWAY_HOST_PORT:-9000}:9000"
     networks:
