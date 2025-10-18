@@ -33,14 +33,9 @@ with DAG(
         bash_command="python -m pipeline.extract_load",
     )
 
-    clean_data = BashOperator(
-        task_id="clean_data",
-        bash_command="python -m pipeline.data_cleaner",
-    )
-
     build_features = BashOperator(
         task_id="build_features",
-        bash_command="python -m pipeline.build_features_v2",
+        bash_command="python -m pipeline.build_features",
     )
 
     train_models = BashOperator(
@@ -63,7 +58,7 @@ with DAG(
         bash_command="redis-cli -h redis -p 6379 FLUSHDB",
     )
 
-    extract_incremental >> clean_data >> build_features >> train_models >> update_recall >> [
+    extract_incremental >> build_features >> train_models >> update_recall >> [
         reload_api,
         clear_cache,
     ]
