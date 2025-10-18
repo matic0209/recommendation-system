@@ -30,12 +30,12 @@ with DAG(
 
     extract_incremental = BashOperator(
         task_id="extract_incremental_data",
-        bash_command="python -m pipeline.extract_load --incremental",
+        bash_command="python -m pipeline.extract_load",
     )
 
     clean_data = BashOperator(
         task_id="clean_data",
-        bash_command="python -m pipeline.clean_data",
+        bash_command="python -m pipeline.data_cleaner",
     )
 
     build_features = BashOperator(
@@ -45,7 +45,7 @@ with DAG(
 
     train_models = BashOperator(
         task_id="train_models",
-        bash_command="python -m pipeline.train_models --incremental",
+        bash_command="python -m pipeline.train_models",
     )
 
     update_recall = BashOperator(
