@@ -173,11 +173,15 @@ class RecommendationItem(BaseModel):
 class RecommendationResponse(BaseModel):
     dataset_id: int
     recommendations: List[RecommendationItem]
+    request_id: str  # 用于前端埋点追踪
+    algorithm_version: Optional[str] = None  # 算法版本，用于A/B对比
 
 
 class SimilarResponse(BaseModel):
     dataset_id: int
     similar_items: List[RecommendationItem]
+    request_id: str  # 用于前端埋点追踪
+    algorithm_version: Optional[str] = None  # 算法版本，用于A/B对比
 
 
 class ReloadRequest(BaseModel):
@@ -1342,7 +1346,12 @@ async def get_similar(
                     detail = f"{detail} (degraded={degrade_reason})"
                 raise HTTPException(status_code=503 if degrade_reason else 404, detail=detail)
 
-        response = SimilarResponse(dataset_id=dataset_id, similar_items=items[:limit])
+        response = SimilarResponse(
+            dataset_id=dataset_id,
+            similar_items=items[:limit],
+            request_id=request_id,
+            algorithm_version=run_id
+        )
 
         _log_exposure(
             "similar",
@@ -1552,7 +1561,12 @@ async def recommend_for_detail(
                     detail = f"{detail} (degraded={degrade_reason})"
                 raise HTTPException(status_code=503 if degrade_reason else 404, detail=detail)
 
-        response = RecommendationResponse(dataset_id=dataset_id, recommendations=items[:limit])
+        response = RecommendationResponse(
+            dataset_id=dataset_id,
+            recommendations=items[:limit],
+            request_id=request_id,
+            algorithm_version=run_id
+        )
 
         _log_exposure(
             "recommend_detail",

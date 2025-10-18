@@ -174,7 +174,17 @@ def _load_dataset_metadata_table() -> pd.DataFrame:
     if not path.exists():
         return pd.DataFrame()
     frame = pd.read_parquet(path)
-    return frame.rename(columns={"dataset_id": "dataset_id", "dataset_name": "title"})
+    # Ensure consistent column naming even when dataset_name absent
+    columns = frame.columns.tolist()
+    rename_map = {"dataset_name": "title"}
+    frame = frame.rename(columns={k: v for k, v in rename_map.items() if k in columns})
+    if "title" not in frame.columns:
+        frame["title"] = ""
+    if "price" not in frame.columns:
+        frame["price"] = 0.0
+    if "create_company_name" not in frame.columns:
+        frame["create_company_name"] = ""
+    return frame
 
 
 def _load_exposure_log() -> pd.DataFrame:
