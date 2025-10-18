@@ -49,11 +49,13 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       SENTENCE_TRANSFORMERS_HOME: /opt/recommend/cache/sentence-transformers
       HF_HOME: /opt/recommend/cache/huggingface
+      TRANSFORMERS_CACHE: /opt/recommend/cache/huggingface/hub
     volumes:
       - ./data:/app/data
       - ./models:/app/models
       - ./logs:/app/logs
-      - /opt/recommend/cache/sentence-transformers:/opt/recommend/cache/sentence-transformers:ro
+      - /opt/recommend/cache/sentence-transformers:/opt/recommend/cache/sentence-transformers
+      - /opt/recommend/cache/huggingface:/opt/recommend/cache/huggingface
     ports:
       - "${RECOMMEND_API_HOST_PORT:-8000}:8000"
     extra_hosts:
@@ -90,6 +92,7 @@ services:
       MLFLOW_TRACKING_URI: http://mlflow:5000
       SENTENCE_TRANSFORMERS_HOME: /opt/recommend/cache/sentence-transformers
       HF_HOME: /opt/recommend/cache/huggingface
+      TRANSFORMERS_CACHE: /opt/recommend/cache/huggingface/hub
     depends_on:
       postgres-airflow:
         condition: service_healthy
@@ -99,6 +102,8 @@ services:
       - .:/opt/recommend
       - mlflow-data:/mlflow
       - /dianshu/backup/data/dianshu_data/jsons:/dianshu/backup/data/dianshu_data/jsons:ro
+      - /opt/recommend/cache/sentence-transformers:/opt/recommend/cache/sentence-transformers
+      - /opt/recommend/cache/huggingface:/opt/recommend/cache/huggingface
     networks:
       - recommend-net
 
@@ -141,6 +146,7 @@ services:
       MLFLOW_TRACKING_URI: http://mlflow:5000
       SENTENCE_TRANSFORMERS_HOME: /opt/recommend/cache/sentence-transformers
       HF_HOME: /opt/recommend/cache/huggingface
+      TRANSFORMERS_CACHE: /opt/recommend/cache/huggingface/hub
     volumes:
       - .:/opt/recommend
       - ./airflow/dags:/opt/airflow/dags
@@ -148,7 +154,8 @@ services:
       - ./airflow/plugins:/opt/airflow/plugins
       - mlflow-data:/mlflow
       - /dianshu/backup/data/dianshu_data/jsons:/dianshu/backup/data/dianshu_data/jsons:ro
-      - /opt/recommend/cache/sentence-transformers:/opt/recommend/cache/sentence-transformers:ro
+      - /opt/recommend/cache/sentence-transformers:/opt/recommend/cache/sentence-transformers
+      - /opt/recommend/cache/huggingface:/opt/recommend/cache/huggingface
     ports:
       - "${AIRFLOW_WEB_HOST_PORT:-8080}:8080"
     command: webserver
@@ -177,6 +184,7 @@ services:
       MLFLOW_TRACKING_URI: http://mlflow:5000
       SENTENCE_TRANSFORMERS_HOME: /opt/recommend/cache/sentence-transformers
       HF_HOME: /opt/recommend/cache/huggingface
+      TRANSFORMERS_CACHE: /opt/recommend/cache/huggingface/hub
     volumes:
       - mlflow-data:/mlflow
       - .:/opt/recommend
@@ -184,7 +192,8 @@ services:
       - ./airflow/logs:/opt/airflow/logs
       - ./airflow/plugins:/opt/airflow/plugins
       - /dianshu/backup/data/dianshu_data/jsons:/dianshu/backup/data/dianshu_data/jsons:ro
-      - /opt/recommend/cache/sentence-transformers:/opt/recommend/cache/sentence-transformers:ro
+      - /opt/recommend/cache/sentence-transformers:/opt/recommend/cache/sentence-transformers
+      - /opt/recommend/cache/huggingface:/opt/recommend/cache/huggingface
     command: scheduler
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -248,12 +257,14 @@ services:
       WEIXIN_DEFAULT_USER: ${WEIXIN_DEFAULT_USER:-ZhangJinBo}
       SENTENCE_TRANSFORMERS_HOME: /opt/recommend/cache/sentence-transformers
       HF_HOME: /opt/recommend/cache/huggingface
+      TRANSFORMERS_CACHE: /opt/recommend/cache/huggingface/hub
     ports:
       - "${NOTIFICATION_GATEWAY_HOST_PORT:-9000}:9000"
     networks:
       - recommend-net
     volumes:
-      - /opt/recommend/cache/sentence-transformers:/opt/recommend/cache/sentence-transformers:ro
+      - /opt/recommend/cache/sentence-transformers:/opt/recommend/cache/sentence-transformers
+      - /opt/recommend/cache/huggingface:/opt/recommend/cache/huggingface
 
 networks:
   recommend-net:
