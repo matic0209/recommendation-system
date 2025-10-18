@@ -7,6 +7,29 @@ from datetime import datetime, timedelta
 
 from airflow import DAG
 from airflow.operators.bash import BashOperator
+from airflow.operators.python import PythonOperator
+
+
+def flush_redis_cache() -> None:
+    """Flush Redis feature DB so API reload picks up fresh models/features."""
+    import os
+    import logging
+
+    import redis
+
+    logger = logging.getLogger(__name__)
+    redis_host = os.getenv("REDIS_HOST", "redis")
+    redis_port = int(os.getenv("REDIS_PORT", "6379"))
+    redis_db = int(os.getenv("REDIS_FEATURE_DB", "1"))
+    redis_password = os.getenv("REDIS_PASSWORD")
+
+    try:
+        client = redis.Redis(host=redis_host, port=redis_port, db=redis_db, password=redis_password)
+        client.flushdb()
+        logger.info("Flushed Redis cache (host=%s, port=%d, db=%d)", redis_host, redis_port, redis_db)
+    except redis.RedisError as exc:  # pragma: no cover - operational safeguard
+        logger.exception("Failed to flush Redis cache")
+        raise RuntimeError("Failed to flush Redis cache") from exc
 
 DEFAULT_ARGS = {
     "owner": "recommend-system",
@@ -53,9 +76,9 @@ with DAG(
         bash_command="curl -X POST http://recommendation-api:8000/models/reload",
     )
 
-    clear_cache = BashOperator(
+    clear_cache = PythonOperator(
         task_id="clear_redis_cache",
-        bash_command="redis-cli -h redis -p 6379 FLUSHDB",
+        python_callable=flush_redis_cache,
     )
 
     extract_incremental >> build_features >> train_models >> update_recall >> [
