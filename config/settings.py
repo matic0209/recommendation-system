@@ -15,7 +15,17 @@ DATA_DIR: Path = BASE_DIR / "data"
 MODELS_DIR: Path = BASE_DIR / "models"
 FEATURE_STORE_PATH: Path = DATA_DIR / "feature_store.db"
 MLFLOW_DIR: Path = BASE_DIR / "mlruns"
-MLFLOW_TRACKING_URI: str = os.getenv("MLFLOW_TRACKING_URI", f"file://{MLFLOW_DIR}")
+_env_tracking_uri = os.getenv("MLFLOW_TRACKING_URI")
+if _env_tracking_uri and _env_tracking_uri.startswith("file://"):
+    # Normalize file URIs so relative paths under repo don't resolve to root (/mlruns).
+    relative_path = _env_tracking_uri[len("file://"):]
+    if relative_path.startswith("./") or relative_path.startswith("../") or not relative_path.startswith("/"):
+        resolved = (BASE_DIR / relative_path).resolve()
+        MLFLOW_TRACKING_URI = f"file://{resolved}"
+    else:
+        MLFLOW_TRACKING_URI = _env_tracking_uri
+else:
+    MLFLOW_TRACKING_URI = _env_tracking_uri or f"file://{MLFLOW_DIR}"
 MLFLOW_EXPERIMENT_NAME: str = os.getenv("MLFLOW_EXPERIMENT_NAME", "dataset_recommendation")
 MODEL_REGISTRY_PATH: Path = MODELS_DIR / "model_registry.json"
 
