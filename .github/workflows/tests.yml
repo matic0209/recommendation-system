@@ -9,6 +9,12 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      HF_HUB_OFFLINE: "1"
+      HF_HOME: ${{ github.workspace }}/hf_cache
+      SENTENCE_TRANSFORMERS_HOME: ${{ github.workspace }}/hf_cache
+      TRANSFORMERS_CACHE: ${{ github.workspace }}/hf_cache
+      CLIP_MODEL_PATH: ""
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -18,11 +24,22 @@ jobs:
         with:
           python-version: '3.8'
 
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pytest
+
+      - name: Prepare cache directory
+        run: mkdir -p "$HF_HOME"
 
       - name: Run pytest
         run: |
