@@ -472,7 +472,9 @@ class FeatureEngineV2:
         """Sync features to SQLite feature store."""
         FEATURE_STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
 
-        with sqlite3.connect(FEATURE_STORE_PATH) as conn:
+        with sqlite3.connect(FEATURE_STORE_PATH, timeout=30) as conn:
+            conn.execute("PRAGMA journal_mode=WAL;")
+            conn.execute("PRAGMA busy_timeout = 5000;")
             for name, df in tables.items():
                 if df.empty:
                     continue

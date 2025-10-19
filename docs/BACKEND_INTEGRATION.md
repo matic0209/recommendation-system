@@ -626,10 +626,3 @@ public Map<String, Object> getRecommendations(Integer datasetId, Integer userId)
 
 ---
 
-## 联系方式
-
-如有疑问，请联系推荐系统团队：
-- 负责人：[你的名字]
-- 邮箱：[你的邮箱]
-- 推荐API文档：http://recommendation-api:8000/docs
-- 文档更新日期：2025-10-18

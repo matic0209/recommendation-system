@@ -46,21 +46,7 @@
 }
 ```
 
-### 2. 相似推荐API
 
-**接口**: `GET /similar/{dataset_id}?limit=10`
-
-**新版返回**:
-```json
-{
-  "dataset_id": 1,
-  "similar_items": [...],
-  "request_id": "req_20251018_120545_def456",
-  "algorithm_version": "20251018T120530Z"
-}
-```
-
----
 
 ## 前端接入步骤
 
@@ -476,14 +462,7 @@ function handleClick(item, index) {
 
 ---
 
-## 联系方式
 
-如有疑问，请联系后端团队：
-- 负责人：[你的名字]
-- 邮箱：[你的邮箱]
-- 文档更新日期：2025-10-18
-
----
 
 ## 附录：完整追踪链路
 
