@@ -95,6 +95,22 @@ CHUNK_SIZE = int(os.getenv("EXTRACT_CHUNK_SIZE", "50000"))
 MAX_RETRIES = int(os.getenv("EXTRACT_MAX_RETRIES", "3"))
 RETRY_BACKOFF_SECONDS = float(os.getenv("EXTRACT_RETRY_BACKOFF", "3.0"))
 
+PRIMARY_KEYS: Dict[str, Dict[str, tuple[str, ...]]] = {
+    "business": {
+        "user": ("id",),
+        "dataset": ("id",),
+        "task": ("id",),
+        "api_order": ("id",),
+        "dataset_image": ("id",),
+    },
+    "matomo": {
+        "matomo_log_visit": ("idvisit",),
+        "matomo_log_link_visit_action": ("idlink_va",),
+        "matomo_log_action": ("idaction",),
+        "matomo_log_conversion": ("idvisit", "idgoal", "buster"),
+    },
+}
+
 
 @dataclass
 class ExtractionResult:
@@ -326,6 +342,48 @@ def _find_incremental_json_files(json_dir: Path, table: str, last_watermark: Opt
     return [f[1] for f in files]
 
 
+def _get_primary_keys(source: str, table: str) -> Optional[tuple[str, ...]]:
+    return PRIMARY_KEYS.get(source, {}).get(table)
+
+
+def _deduplicate_by_keys(frame: pd.DataFrame, primary_keys: Optional[tuple[str, ...]]) -> pd.DataFrame:
+    if frame.empty or not primary_keys:
+        return frame
+    missing = [col for col in primary_keys if col not in frame.columns]
+    if missing:
+        LOGGER.warning(
+            "Primary key columns %s missing in %s table; skipping deduplication for current chunk",
+            ", ".join(missing),
+            primary_keys,
+        )
+        return frame
+    return frame.drop_duplicates(subset=list(primary_keys), keep="last")
+
+
+def _merge_incremental_output(output_file: Path, chunk: pd.DataFrame, primary_keys: tuple[str, ...]) -> None:
+    if chunk.empty:
+        return
+
+    chunk = _deduplicate_by_keys(chunk, primary_keys)
+    if output_file.exists():
+        try:
+            existing = pd.read_parquet(output_file)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("Failed to read %s (%s); rewriting from chunk only", output_file, exc)
+            existing = pd.DataFrame(columns=chunk.columns)
+        if not existing.empty:
+            combined = pd.concat([existing, chunk], ignore_index=True, copy=False)
+        else:
+            combined = chunk
+    else:
+        combined = chunk
+
+    combined = _deduplicate_by_keys(combined, primary_keys)
+    tmp_path = output_file.with_suffix(".tmp.parquet")
+    combined.to_parquet(tmp_path, index=False)
+    tmp_path.replace(output_file)
+
+
 def _export_table_from_json(
     table: str,
     json_dir: Path,
@@ -410,6 +468,8 @@ def _export_table_from_json(
                 # Convert to DataFrame
                 df = pd.DataFrame(data)
                 df = _apply_json_type_conversions(table, df)
+                primary_keys = _get_primary_keys(source, table)
+                df = _deduplicate_by_keys(df, primary_keys)
                 if df.empty:
                     continue
 
@@ -432,7 +492,9 @@ def _export_table_from_json(
                 _ensure_dir(table_partition_dir)
                 _write_parquet_chunk(partition_path, df, writer_state=writer_state)
 
-                if mode == "incremental":
+                if primary_keys:
+                    _merge_incremental_output(output_file, df, primary_keys)
+                elif mode == "incremental":
                     _append_parquet_chunk(output_file, df, schema_cache=append_schema_cache)
                 else:
                     _write_parquet_chunk(output_file, df, writer_state=writer_state)
@@ -560,6 +622,7 @@ def _export_table(
         partition_path = table_partition_dir / partition_name
         row_count = 0
         watermark = None
+        primary_keys = _get_primary_keys(source, table)
 
         if mode != "incremental" and output_file.exists():
             output_file.unlink()
@@ -567,6 +630,9 @@ def _export_table(
         chunk_iter = _stream_query(engine, query, params, CHUNK_SIZE)
         try:
             for chunk in chunk_iter:
+                if chunk.empty:
+                    continue
+                chunk = _deduplicate_by_keys(chunk, primary_keys)
                 if chunk.empty:
                     continue
                 row_count += len(chunk)
@@ -577,7 +643,9 @@ def _export_table(
                 _ensure_dir(output_dir)
                 _ensure_dir(table_partition_dir)
                 _write_parquet_chunk(partition_path, chunk, writer_state=writer_state)
-                if mode == "incremental":
+                if primary_keys:
+                    _merge_incremental_output(output_file, chunk, primary_keys)
+                elif mode == "incremental":
                     _append_parquet_chunk(output_file, chunk, schema_cache=append_schema_cache)
                 else:
                     _write_parquet_chunk(output_file, chunk, writer_state=writer_state)
