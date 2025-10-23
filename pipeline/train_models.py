@@ -271,6 +271,13 @@ def _prepare_ranking_dataset(
 def _train_ranking_model(features: pd.DataFrame, target: pd.Series) -> Tuple[Pipeline | None, float]:
     if features.empty or target.nunique() <= 1:
         return None, 0.0
+    class_counts = target.value_counts()
+    if (class_counts < 2).any():
+        LOGGER.warning(
+            "Skipping ranking model training due to insufficient class samples (counts=%s)",
+            class_counts.to_dict(),
+        )
+        return None, 0.0
 
     X_train, X_test, y_train, y_test = train_test_split(
         features,
