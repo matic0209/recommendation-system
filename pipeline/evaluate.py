@@ -174,7 +174,17 @@ def _load_dataset_metadata_table() -> pd.DataFrame:
     if not path.exists():
         return pd.DataFrame()
     frame = pd.read_parquet(path)
-    return frame.rename(columns={"dataset_id": "dataset_id", "dataset_name": "title"})
+    # Ensure consistent column naming even when dataset_name absent
+    columns = frame.columns.tolist()
+    rename_map = {"dataset_name": "title"}
+    frame = frame.rename(columns={k: v for k, v in rename_map.items() if k in columns})
+    if "title" not in frame.columns:
+        frame["title"] = ""
+    if "price" not in frame.columns:
+        frame["price"] = 0.0
+    if "create_company_name" not in frame.columns:
+        frame["create_company_name"] = ""
+    return frame
 
 
 def _load_exposure_log() -> pd.DataFrame:
@@ -271,13 +281,21 @@ def _compute_exposure_metrics(
     exposures_by_version["dataset_total_exposures"] = exposures_by_version["dataset_total_exposures"].replace(0, np.nan)
 
     if not actions.empty:
-        clicks_by_dataset = actions.groupby("dataset_id").size().rename("total_clicks")
+        clicks_by_dataset = (
+            actions.groupby("dataset_id")
+            .size()
+            .reset_index(name="total_clicks")
+        )
     else:
-        clicks_by_dataset = pd.Series(dtype=float)
+        clicks_by_dataset = pd.DataFrame(columns=["dataset_id", "total_clicks"])
     if not conversions.empty:
-        conv_by_dataset = conversions.groupby("dataset_id").size().rename("total_conversions")
+        conv_by_dataset = (
+            conversions.groupby("dataset_id")
+            .size()
+            .reset_index(name="total_conversions")
+        )
     else:
-        conv_by_dataset = pd.Series(dtype=float)
+        conv_by_dataset = pd.DataFrame(columns=["dataset_id", "total_conversions"])
 
     merged = exposures_by_version.merge(clicks_by_dataset, on="dataset_id", how="left")
     merged = merged.merge(conv_by_dataset, on="dataset_id", how="left")

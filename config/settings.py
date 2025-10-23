@@ -15,16 +15,33 @@ DATA_DIR: Path = BASE_DIR / "data"
 MODELS_DIR: Path = BASE_DIR / "models"
 FEATURE_STORE_PATH: Path = DATA_DIR / "feature_store.db"
 MLFLOW_DIR: Path = BASE_DIR / "mlruns"
-MLFLOW_TRACKING_URI: str = os.getenv("MLFLOW_TRACKING_URI", f"file://{MLFLOW_DIR}")
+_env_tracking_uri = os.getenv("MLFLOW_TRACKING_URI")
+if _env_tracking_uri and _env_tracking_uri.startswith("file://"):
+    # Normalize file URIs so relative paths under repo don't resolve to root (/mlruns).
+    relative_path = _env_tracking_uri[len("file://"):]
+    if relative_path.startswith("./") or relative_path.startswith("../") or not relative_path.startswith("/"):
+        resolved = (BASE_DIR / relative_path).resolve()
+        MLFLOW_TRACKING_URI = f"file://{resolved}"
+    else:
+        MLFLOW_TRACKING_URI = _env_tracking_uri
+else:
+    MLFLOW_TRACKING_URI = _env_tracking_uri or f"file://{MLFLOW_DIR}"
 MLFLOW_EXPERIMENT_NAME: str = os.getenv("MLFLOW_EXPERIMENT_NAME", "dataset_recommendation")
 MODEL_REGISTRY_PATH: Path = MODELS_DIR / "model_registry.json"
 
 DATA_SOURCE: str = os.getenv("DATA_SOURCE", "json").lower()
 DATA_JSON_DIR: Path = Path(os.getenv("DATA_JSON_DIR", DATA_DIR / "dianshu_data"))
+BUSINESS_SOURCE_MODE: str = os.getenv("BUSINESS_DATA_SOURCE", "json").lower()
+MATOMO_SOURCE_MODE: str = os.getenv("MATOMO_DATA_SOURCE", os.getenv("MATOMO_SOURCE", DATA_SOURCE)).lower()
 SOURCE_DATA_MODES: Dict[str, str] = {
-    "business": os.getenv("BUSINESS_DATA_SOURCE", DATA_SOURCE).lower(),
-    "matomo": os.getenv("MATOMO_DATA_SOURCE", os.getenv("MATOMO_SOURCE", DATA_SOURCE)).lower(),
+    "business": BUSINESS_SOURCE_MODE,
+    "matomo": MATOMO_SOURCE_MODE,
 }
+_dataset_image_root_env = os.getenv("DATASET_IMAGE_ROOT")
+if _dataset_image_root_env:
+    DATASET_IMAGE_ROOT: Path = Path(_dataset_image_root_env)
+else:
+    DATASET_IMAGE_ROOT = DATA_JSON_DIR / "images"
 
 
 @dataclass
@@ -89,6 +106,9 @@ __all__ = [
     "DATA_SOURCE",
     "DATA_JSON_DIR",
     "SOURCE_DATA_MODES",
+    "BUSINESS_SOURCE_MODE",
+    "MATOMO_SOURCE_MODE",
+    "DATASET_IMAGE_ROOT",
     "FEATURE_STORE_PATH",
     "MLFLOW_DIR",
     "MLFLOW_TRACKING_URI",

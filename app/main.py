@@ -173,11 +173,15 @@ class RecommendationItem(BaseModel):
 class RecommendationResponse(BaseModel):
     dataset_id: int
     recommendations: List[RecommendationItem]
+    request_id: str  # 用于前端埋点追踪
+    algorithm_version: Optional[str] = None  # 算法版本，用于A/B对比
 
 
 class SimilarResponse(BaseModel):
     dataset_id: int
     similar_items: List[RecommendationItem]
+    request_id: str  # 用于前端埋点追踪
+    algorithm_version: Optional[str] = None  # 算法版本，用于A/B对比
 
 
 class ReloadRequest(BaseModel):
@@ -966,6 +970,13 @@ def _compute_ranking_features(
     features["tag_count"] = selected["tag_count"].fillna(0.0)
     features["weight_log"] = np.log1p(stats["total_weight"].clip(lower=0.0))
     features["interaction_count"] = stats["interaction_count"].fillna(0.0)
+
+    optional_columns = ["image_richness_score", "image_embed_norm", "has_images", "has_cover"]
+    for col in optional_columns:
+        if col in selected.columns:
+            features[col] = pd.to_numeric(selected[col], errors="coerce").fillna(0.0)
+        else:
+            features[col] = 0.0
     return features
 
 
@@ -1342,7 +1353,12 @@ async def get_similar(
                     detail = f"{detail} (degraded={degrade_reason})"
                 raise HTTPException(status_code=503 if degrade_reason else 404, detail=detail)
 
-        response = SimilarResponse(dataset_id=dataset_id, similar_items=items[:limit])
+        response = SimilarResponse(
+            dataset_id=dataset_id,
+            similar_items=items[:limit],
+            request_id=request_id,
+            algorithm_version=run_id
+        )
 
         _log_exposure(
             "similar",
@@ -1552,7 +1568,12 @@ async def recommend_for_detail(
                     detail = f"{detail} (degraded={degrade_reason})"
                 raise HTTPException(status_code=503 if degrade_reason else 404, detail=detail)
 
-        response = RecommendationResponse(dataset_id=dataset_id, recommendations=items[:limit])
+        response = RecommendationResponse(
+            dataset_id=dataset_id,
+            recommendations=items[:limit],
+            request_id=request_id,
+            algorithm_version=run_id
+        )
 
         _log_exposure(
             "recommend_detail",

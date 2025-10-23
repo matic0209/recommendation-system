@@ -12,7 +12,7 @@ from typing import Dict
 import numpy as np
 import pandas as pd
 
-from config.settings import BASE_DIR, DATA_DIR, FEATURE_STORE_PATH
+from config.settings import BASE_DIR, DATA_DIR, FEATURE_STORE_PATH, DATASET_IMAGE_ROOT
 from pipeline.data_cleaner import DataCleaner
 from pipeline.build_features_v2 import FeatureEngineV2
 from pipeline.feature_store_redis import RedisFeatureStore
@@ -148,6 +148,14 @@ def build_dataset_features(dataset_path: Path) -> pd.DataFrame:
     if dataset_df.empty:
         return pd.DataFrame(columns=["dataset_id", "dataset_name", "description", "tag", "price", "create_company_name", "cover_id", "create_time"])
 
+    if "is_delete" in dataset_df.columns:
+        original_count = len(dataset_df)
+        flags = pd.to_numeric(dataset_df["is_delete"], errors="coerce").fillna(0).astype(int)
+        dataset_df = dataset_df[flags == 0].copy()
+        removed = original_count - len(dataset_df)
+        if removed > 0:
+            LOGGER.info("Filtered %d deleted datasets (is_delete=1)", removed)
+
     dataset_df = dataset_df.rename(columns={"id": "dataset_id"})
     columns = [
         "dataset_id",
@@ -247,11 +255,20 @@ def main() -> None:
         interaction_inputs["order_tab"] = legacy_order_parquet
 
     interactions = build_interactions(interaction_inputs)
+    dataset_features = build_dataset_features(business_dir / "dataset.parquet")
+
+    active_dataset_ids = set(dataset_features["dataset_id"].dropna().astype(int)) if not dataset_features.empty else set()
+    if active_dataset_ids:
+        before = len(interactions)
+        interactions = interactions[interactions["dataset_id"].isin(active_dataset_ids)].reset_index(drop=True)
+        removed = before - len(interactions)
+        if removed > 0:
+            LOGGER.info("Dropped %d interactions referencing deleted datasets", removed)
+
     interactions_path = PROCESSED_DIR / "interactions.parquet"
     interactions.to_parquet(interactions_path, index=False)
     LOGGER.info("Saved interactions to %s", interactions_path)
 
-    dataset_features = build_dataset_features(business_dir / "dataset.parquet")
     dataset_path = PROCESSED_DIR / "dataset_features.parquet"
     dataset_features.to_parquet(dataset_path, index=False)
     LOGGER.info("Saved dataset features to %s", dataset_path)
@@ -304,13 +321,21 @@ def main() -> None:
         dataset_image = pd.read_parquet(dataset_image_path)
         LOGGER.info("Loaded %d image records for feature engineering", len(dataset_image))
 
+        if active_dataset_ids:
+            before_imgs = len(dataset_image)
+            dataset_image = dataset_image[dataset_image["dataset_id"].isin(active_dataset_ids)].reset_index(drop=True)
+            trimmed = before_imgs - len(dataset_image)
+            if trimmed > 0:
+                LOGGER.info("Removed %d image rows for deleted datasets", trimmed)
+
         if embeddings_path.exists():
             LOGGER.info("Using precomputed visual embeddings from %s", embeddings_path)
             image_embeddings = pd.read_parquet(embeddings_path)
         elif VISUAL_FEATURES_AVAILABLE:
             try:
                 visual_cache = BASE_DIR / "cache" / "images"
-                visual_extractor = VisualImageFeatureExtractor(visual_cache, VisualEmbeddingConfig())
+                visual_config = VisualEmbeddingConfig(local_image_root=DATASET_IMAGE_ROOT)
+                visual_extractor = VisualImageFeatureExtractor(visual_cache, visual_config)
                 image_embeddings = visual_extractor.build_dataset_embeddings(dataset_image)
                 try:
                     image_embeddings.to_parquet(embeddings_path, index=False)
@@ -334,6 +359,13 @@ def main() -> None:
                 image_embeddings = pd.DataFrame()
         else:
             LOGGER.info("Visual embedding extraction skipped (dependencies not available)")
+
+        if not image_embeddings.empty and active_dataset_ids:
+            before_emb = len(image_embeddings)
+            image_embeddings = image_embeddings[image_embeddings["dataset_id"].isin(active_dataset_ids)].reset_index(drop=True)
+            trimmed_emb = before_emb - len(image_embeddings)
+            if trimmed_emb > 0:
+                LOGGER.info("Filtered %d visual embedding rows for deleted datasets", trimmed_emb)
     else:
         LOGGER.warning("Image data not found at %s, skipping image features", dataset_image_path)
 
