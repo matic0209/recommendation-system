@@ -1,0 +1,33 @@
+#!/bin/bash
+
+set -x
+exec &> qy_weixin.log
+# set variables
+CropID='wwdc92c6fc7b7d9115'
+Secret='nwL-_8kIsHp6assREMtbLmTTTq4Dw_WyUPYqNw9jGW8'
+GURL="https://qyapi.weixin.qq.com/cgi-bin/gettoken?corpid=$CropID&corpsecret=$Secret"
+User=$1
+Mess=$2
+
+# get acccess_token
+Gtoken=$(curl -s "https://qyapi.weixin.qq.com/cgi-bin/gettoken?corpid=${CropID}&corpsecret=${Secret}"  |awk -F '"' '{print $10}')
+PURL="https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token=$Gtoken"
+echo $Gtoken
+# 发送消息体
+function body() {
+local int AppID=1000019                       #企业号中的应用id
+local UserID=$User                         #部门成员id，zabbix中定义的微信接收者
+#local PartyID=2                           #部门id，定义了范围，组内成员都可接收到消息
+local Msg=$(echo "$@" )   #过滤出zabbix传递的第三个参数
+printf '{\n'
+printf '\t"touser": "'"$UserID"\"",\n"
+printf '\t"toparty": "'"$PartyID"\"",\n"
+printf '\t"msgtype": "text",\n'
+printf '\t"agentid": "'"$AppID"\"",\n"
+printf '\t"text": {\n'
+printf '\t\t"content": "'"$Msg"\""\n"
+printf '\t},\n'
+printf '\t"safe":"0"\n'
+printf '}\n'
+}
+/usr/bin/curl --data-ascii "$(body $2)" $PURL
