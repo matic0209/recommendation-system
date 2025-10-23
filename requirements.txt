@@ -35,7 +35,7 @@ Pillow==10.2.0
 torch==2.1.2
 torchvision==0.16.2
 huggingface-hub==0.14.1
-sentence-transformers==2.2.2
+sentence-transformers==2.3.1
 
 # Phase 3: Vector recall & ranking (optional components)
 # Install when USE_FAISS_RECALL=1 or ONNX export is required

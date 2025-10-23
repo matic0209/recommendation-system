@@ -59,6 +59,17 @@ def _load_frame(path: Path) -> pd.DataFrame:
     return pd.read_parquet(path)
 
 
+def _load_ranking_labels() -> pd.DataFrame:
+    path = DATA_DIR / "processed" / "ranking_labels_by_dataset.parquet"
+    if not path.exists():
+        LOGGER.info("Ranking labels file not found (%s); falling back to interaction-based labels", path)
+        return pd.DataFrame()
+    df = pd.read_parquet(path)
+    if df.empty:
+        LOGGER.info("Ranking labels file %s is empty; falling back to interaction-based labels", path)
+    return df
+
+
 def _ensure_models_dir() -> None:
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -228,6 +239,7 @@ def _update_registry(entry: Dict[str, object]) -> None:
 def _prepare_ranking_dataset(
     dataset_features: pd.DataFrame,
     dataset_stats: pd.DataFrame,
+    labels: Optional[pd.DataFrame],
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.Series]:
     if dataset_features.empty:
         return pd.DataFrame(), pd.DataFrame(), pd.Series(dtype=int)
@@ -260,10 +272,21 @@ def _prepare_ranking_dataset(
     optional_columns = ["image_richness_score", "image_embed_norm", "has_images", "has_cover"]
     for col in optional_columns:
         if col in merged.columns:
-            features[col] = pd.to_numeric(merged[col], errors="coerce").replace([np.inf, -np.inf], np.nan).fillna(0.0)
+            features[col] = (
+                pd.to_numeric(merged[col], errors="coerce")
+                .replace([np.inf, -np.inf], np.nan)
+                .fillna(0.0)
+            )
         else:
             features[col] = 0.0
-    target = (merged["interaction_count"] > 0).astype(int)
+
+    if labels is not None and not labels.empty and "label" in labels.columns:
+        label_series = labels.set_index("dataset_id")["label"]
+        merged = merged.join(label_series, on="dataset_id")
+        merged["label"] = merged["label"].fillna(0).astype(int)
+        target = merged["label"]
+    else:
+        target = (merged["interaction_count"] > 0).astype(int)
     meta = merged[["dataset_id"]].reset_index(drop=True)
 
     return meta, features, target
@@ -349,6 +372,7 @@ def main() -> None:
     interactions = _load_frame(PROCESSED_DIR / "interactions.parquet")
     dataset_features = _load_frame(PROCESSED_DIR / "dataset_features.parquet")
     dataset_stats = _load_frame(PROCESSED_DIR / "dataset_stats.parquet")
+    ranking_labels = _load_ranking_labels()
 
     # Prefer enhanced feature views when available
     interactions_v2 = _load_frame(PROCESSED_DIR / "interactions_v2.parquet")
@@ -368,7 +392,11 @@ def main() -> None:
     vector_recall = build_vector_recall(content_matrix, content_ids, VECTOR_RECALL_K)
     popular_items = build_popular_items(interactions)
 
-    ranking_meta, ranking_features, ranking_target = _prepare_ranking_dataset(dataset_features, dataset_stats)
+    ranking_meta, ranking_features, ranking_target = _prepare_ranking_dataset(
+        dataset_features,
+        dataset_stats,
+        ranking_labels,
+    )
     ranking_model, ranking_auc = _train_ranking_model(ranking_features, ranking_target)
     ranking_scores = _score_ranking_model(ranking_model, ranking_features)
 
@@ -412,6 +440,9 @@ def main() -> None:
         "vector_recall_k": VECTOR_RECALL_K,
         "image_embeddings_available": embeddings_available,
         "image_similarity_weight": content_meta.get("image_similarity_weight", 0.0),
+        "ranking_labels_source": "matomo" if not ranking_labels.empty else "interactions",
+        "ranking_samples": int(len(ranking_target)),
+        "ranking_positive_samples": int(ranking_target.sum()) if not ranking_target.empty else 0,
     }
     metrics = {
         "behavior_item_count": float(len(behavior_model)),
