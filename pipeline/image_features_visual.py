@@ -30,6 +30,7 @@ class VisualEmbeddingConfig:
     request_timeout: int = 10
     retry_attempts: int = 2
     sleep_between_retries: float = 0.5
+    local_image_root: Optional[Path] = None
 
 
 class VisualImageFeatureExtractor:
@@ -43,6 +44,11 @@ class VisualImageFeatureExtractor:
         self.cache_dir = cache_dir
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.config = config or VisualEmbeddingConfig()
+        self.local_image_root = (
+            Path(self.config.local_image_root).expanduser().resolve()
+            if getattr(self.config, "local_image_root", None)
+            else None
+        )
         self.model = SentenceTransformer(
             self.config.model_name,
             device=self.config.device,
@@ -118,6 +124,40 @@ class VisualImageFeatureExtractor:
         dataset_images: pd.DataFrame,
     ) -> List[Tuple[int, Path]]:
         """Download images to the cache directory."""
+        if self.local_image_root and self.local_image_root.exists():
+            records: List[Tuple[int, Path]] = []
+            dataset_ids = (
+                dataset_images.get("dataset_id")
+                if isinstance(dataset_images, pd.DataFrame)
+                else pd.Series(dtype=int)
+            )
+            if isinstance(dataset_ids, pd.Series) and not dataset_ids.empty:
+                unique_ids = dataset_ids.dropna().astype(int).unique()
+            else:
+                unique_ids = []
+
+            for dataset_id in unique_ids:
+                dataset_dir = self.local_image_root / str(dataset_id)
+                if not dataset_dir.exists():
+                    LOGGER.debug("Local image directory missing for dataset %s", dataset_id)
+                    continue
+                image_paths = sorted(
+                    path for path in dataset_dir.iterdir() if path.is_file()
+                )
+                if not image_paths:
+                    LOGGER.debug("No images found under %s", dataset_dir)
+                    continue
+                for path in image_paths[: self.config.max_images_per_item]:
+                    records.append((int(dataset_id), path))
+
+            if records:
+                LOGGER.info(
+                    "Loaded %d pre-downloaded images from %s",
+                    len(records),
+                    self.local_image_root,
+                )
+                return records
+
         records: List[Tuple[int, Path]] = []
         for _, row in dataset_images.iterrows():
             dataset_id = int(row["dataset_id"])
