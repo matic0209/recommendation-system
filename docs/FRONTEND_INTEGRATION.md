@@ -128,8 +128,8 @@ function trackClick(event, element) {
 
   // 确保Matomo已加载
   if (typeof _paq !== 'undefined') {
-    // 1. 设置自定义维度1 = request_id（关键！）
-    _paq.push(['setCustomDimension', customDimensionId=1, requestId]);
+    // 1. 设置自定义维度3 = request_id（关键！）
+    _paq.push(['setCustomDimension', 3, requestId]);
 
     // 2. 发送点击事件
     _paq.push([
@@ -162,12 +162,12 @@ function trackClick(event, element) {
 1. 登录Matomo管理后台
 2. 进入 `设置` > `网站` > `自定义维度`
 3. 新增访问级别（Visit scope）自定义维度：
-   - **维度ID**: 1
+   - **维度ID**: 3
    - **名称**: `recommendation_request_id`
    - **范围**: Visit
    - **状态**: 激活
 
-配置完成后，Matomo会在 `log_link_visit_action` 表中记录 `custom_dimension_1` 字段。
+配置完成后，Matomo会在 `log_link_visit_action` 表中记录 `custom_dimension_3` 字段。
 
 ---
 
@@ -199,7 +199,7 @@ function RecommendationList({ datasetId, userId }) {
   const handleClick = (item, index) => {
     // 发送Matomo事件
     if (window._paq) {
-      window._paq.push(['setCustomDimension', 1, requestId]);
+      window._paq.push(['setCustomDimension', 3, requestId]);
       window._paq.push([
         'trackEvent',
         'Recommendation',
@@ -284,7 +284,7 @@ function getTrackingUrl(datasetId, position) {
 
 function handleClick(item, index) {
   if (window._paq) {
-    window._paq.push(['setCustomDimension', 1, requestId.value]);
+    window._paq.push(['setCustomDimension', 3, requestId.value]);
     window._paq.push([
       'trackEvent',
       'Recommendation',
@@ -343,7 +343,7 @@ function trackRecommendationClick(element) {
   const position = element.dataset.position;
 
   if (window._paq) {
-    _paq.push(['setCustomDimension', 1, requestId]);
+    _paq.push(['setCustomDimension', 3, requestId]);
     _paq.push([
       'trackEvent',
       'Recommendation',
@@ -380,7 +380,7 @@ loadRecommendations(1, 123);
 console.log(window._paq);  // 应该是一个数组
 
 // 4. 手动测试发送事件
-_paq.push(['setCustomDimension', 1, 'test_request_id']);
+_paq.push(['setCustomDimension', 3, 'test_request_id']);
 _paq.push(['trackEvent', 'Test', 'Click', 'test', 1]);
 ```
 
@@ -394,7 +394,7 @@ _paq.push(['trackEvent', 'Test', 'Click', 'test', 1]);
    - 应该能看到 `recommendation_request_id` 的数据
 
 3. **通知后端验证**
-   - 后端同事会从Matomo数据库中验证是否记录了 `custom_dimension_1`
+   - 后端同事会从Matomo数据库中验证是否记录了 `custom_dimension_3`
 
 ---
 
@@ -483,20 +483,20 @@ function handleClick(item, index) {
 5. 用户点击推荐
    ↓
 6. 前端发送Matomo事件:
-   _paq.push(['setCustomDimension', 1, 'req_20251018_120530_abc123']);
+   _paq.push(['setCustomDimension', 3, 'req_20251018_120530_abc123']);
    _paq.push(['trackEvent', 'Recommendation', 'Click', 'dataset_42', 0]);
    ↓
 7. 页面跳转到详情页（带追踪参数）
    ↓
 8. Matomo记录到数据库:
-   - log_link_visit_action.custom_dimension_1 = 'req_20251018_120530_abc123'
+   - log_link_visit_action.custom_dimension_3 = 'req_20251018_120530_abc123'
    - log_link_visit_action.idaction_url = '/dataDetail/42?from=recommend&...'
    - log_link_visit_action.idaction_event_category = 'Recommendation'
    ↓
 9. 后端定期抽取Matomo数据
    ↓
 10. 后端评估脚本关联:
-    曝光(request_id=req_xxx) + 点击(custom_dimension_1=req_xxx)
+    曝光(request_id=req_xxx) + 点击(custom_dimension_3=req_xxx)
     → 计算真实CTR
 ```
 
@@ -514,7 +514,7 @@ function handleClick(item, index) {
 function handleRecommendClick(item, requestId, position) {
   // 1. 发送点击事件（已有）
   if (window._paq) {
-    window._paq.push(['setCustomDimension', 1, requestId]);
+    window._paq.push(['setCustomDimension', 3, requestId]);
     window._paq.push(['trackEvent', 'Recommendation', 'Click', `dataset_${item.dataset_id}`, position]);
   }
 
@@ -564,7 +564,7 @@ function trackPurchaseSuccess(orderId, datasetId, revenue) {
   if (window._paq) {
     // 如果是推荐归因，设置自定义维度
     if (recommendData) {
-      _paq.push(['setCustomDimension', 1, recommendData.request_id]);
+      _paq.push(['setCustomDimension', 3, recommendData.request_id]);
       _paq.push(['setCustomDimension', 2, recommendData.position.toString()]);
 
       console.log('[Tracking] Purchase attributed to recommendation', recommendData);
@@ -681,7 +681,7 @@ function trackPurchaseSuccess(orderId, datasetId, revenue) {
   // 发送Matomo事件
   if (window._paq) {
     if (recommendData) {
-      _paq.push(['setCustomDimension', 1, recommendData.request_id]);
+      _paq.push(['setCustomDimension', 3, recommendData.request_id]);
       _paq.push(['setCustomDimension', 2, recommendData.position.toString()]);
     }
 
@@ -733,4 +733,3 @@ CVR = 推荐购买数 / 推荐曝光数
 - 点击：85次 → CTR = 8.5%
 - 购买：12次 → CVR = 1.2%
 - 购买转化率（点击→购买）：12/85 = 14.1%
-

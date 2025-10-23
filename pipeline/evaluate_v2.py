@@ -5,6 +5,7 @@ import json
 import logging
 import math
 import re
+import os
 from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
@@ -13,6 +14,15 @@ import numpy as np
 import pandas as pd
 
 from config.settings import DATA_DIR, MODELS_DIR
+
+REQUEST_ID_DIMENSION = int(os.getenv("MATOMO_REQUEST_DIMENSION", "3"))
+REQUEST_ID_COLUMN = f"custom_dimension_{REQUEST_ID_DIMENSION}"
+REQUEST_ID_COLUMNS: List[str] = []
+for candidate in [REQUEST_ID_COLUMN, "custom_dimension_3", "custom_dimension_1"]:
+    if candidate and candidate not in REQUEST_ID_COLUMNS:
+        REQUEST_ID_COLUMNS.append(candidate)
+POSITION_DIMENSION = os.getenv("MATOMO_POSITION_DIMENSION")
+POSITION_COLUMN = f"custom_dimension_{POSITION_DIMENSION}" if POSITION_DIMENSION else None
 
 LOGGER = logging.getLogger(__name__)
 EVAL_DIR = DATA_DIR / "evaluation"
@@ -88,6 +98,14 @@ def _extract_dataset_from_row(row: pd.Series, mapping: Dict[int, int]) -> Option
     return None
 
 
+def _get_request_id_from_columns(row: pd.Series) -> Optional[str]:
+    for column in REQUEST_ID_COLUMNS:
+        value = row.get(column, "")
+        if value and isinstance(value, str) and value.startswith("req_"):
+            return value
+    return None
+
+
 def _is_recommend_click(row: pd.Series) -> bool:
     """Check if the click is from recommendation based on URL parameters or custom dimension."""
     # 方法1: 检查URL中是否包含from=recommend
@@ -96,8 +114,8 @@ def _is_recommend_click(row: pd.Series) -> bool:
         return True
 
     # 方法2: 检查custom_dimension_1是否有值（表示有request_id）
-    custom_dim = row.get('custom_dimension_1', '')
-    if custom_dim and isinstance(custom_dim, str) and custom_dim.startswith('req_'):
+    custom_dim = _get_request_id_from_columns(row)
+    if custom_dim:
         return True
 
     return False
@@ -106,8 +124,8 @@ def _is_recommend_click(row: pd.Series) -> bool:
 def _extract_request_id_from_row(row: pd.Series) -> Optional[str]:
     """Extract request_id from custom dimension or URL parameter."""
     # 优先从custom_dimension_1提取
-    custom_dim = row.get('custom_dimension_1', '')
-    if custom_dim and isinstance(custom_dim, str) and custom_dim.startswith('req_'):
+    custom_dim = _get_request_id_from_columns(row)
+    if custom_dim:
         return custom_dim
 
     # 尝试从URL参数提取
@@ -216,14 +234,17 @@ def _load_recommend_conversions(mapping: Dict[int, int]) -> pd.DataFrame:
         request_id = None
         position = None
 
-        custom_dim = conv_row.get('custom_dimension_1', '')
-        if custom_dim and isinstance(custom_dim, str) and custom_dim.startswith('req_'):
+        custom_dim = _get_request_id_from_columns(conv_row)
+        if custom_dim:
             request_id = custom_dim
             LOGGER.debug("Found request_id in conversion custom_dimension_1: %s", request_id)
 
             # Try to get position from custom_dimension_2
-            pos_dim = conv_row.get('custom_dimension_2', '')
-            if pos_dim:
+            if POSITION_COLUMN and POSITION_COLUMN in conv_row:
+                pos_dim = conv_row.get(POSITION_COLUMN, '')
+            else:
+                pos_dim = conv_row.get('custom_dimension_2', '')
+            if pos_dim not in (None, ''):
                 try:
                     position = int(pos_dim)
                 except (ValueError, TypeError):
@@ -238,7 +259,9 @@ def _load_recommend_conversions(mapping: Dict[int, int]) -> pd.DataFrame:
 
                 if not same_visit.empty:
                     # Look for actions with custom_dimension_1 (request_id)
-                    with_rid = same_visit[same_visit['custom_dimension_1'].notna()]
+                    same_visit = same_visit.copy()
+                    same_visit["__req_id"] = same_visit.apply(_get_request_id_from_columns, axis=1)
+                    with_rid = same_visit[same_visit["__req_id"].notna()]
 
                     if not with_rid.empty:
                         # Get the most recent action before conversion
@@ -249,7 +272,7 @@ def _load_recommend_conversions(mapping: Dict[int, int]) -> pd.DataFrame:
                         if not before_purchase.empty:
                             # Get the latest one
                             latest = before_purchase.sort_values('server_time', ascending=False).iloc[0]
-                            req_id = latest.get('custom_dimension_1')
+                            req_id = latest["__req_id"]
 
                             if req_id and isinstance(req_id, str) and req_id.startswith('req_'):
                                 request_id = req_id

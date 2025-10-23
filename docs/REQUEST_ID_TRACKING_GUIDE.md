@@ -62,7 +62,7 @@
 │ Matomo记录                                                │
 │                                                           │
 │ log_link_visit_action:                                   │
-│   - custom_dimension_1 = "req_20251018_120530_abc123"    │
+│   - custom_dimension_3 = "req_20251018_120530_abc123"    │
 │   - idaction_url = "/dataDetail/42?from=recommend&..."   │
 │   - idaction_event_category = "Recommendation"           │
 │   - server_time = 2025-10-18 12:05:30                    │
@@ -76,7 +76,7 @@
 │    request_id="req_xxx" → 曝光了dataset 42               │
 │                                                           │
 │ 2. 读取Matomo数据:                                        │
-│    custom_dimension_1="req_xxx" → 点击了dataset 42       │
+│    custom_dimension_3="req_xxx" → 点击了dataset 42       │
 │                                                           │
 │ 3. 通过request_id精确关联:                               │
 │    CTR = 点击数(req_xxx) / 曝光数(req_xxx)               │
@@ -280,12 +280,12 @@ curl "http://localhost:8000/recommend/detail/1?user_id=123" | jq .request_id
 -- 查看最近的推荐点击
 SELECT
     idlink_va,
-    custom_dimension_1 as request_id,
+    custom_dimension_3 as request_id,
     idaction_url,
     idaction_event_category,
     server_time
 FROM matomo_log_link_visit_action
-WHERE custom_dimension_1 LIKE 'req_%'
+WHERE custom_dimension_3 LIKE 'req_%'
 ORDER BY server_time DESC
 LIMIT 10;
 ```
@@ -299,7 +299,7 @@ LIMIT 10;
 +----------+--------------------------------+---------------+------------------------+---------------------+
 ```
 
-如果 `custom_dimension_1` 列为空或NULL，说明：
+如果 `custom_dimension_3` 列为空或NULL，说明：
 - Matomo自定义维度未配置
 - 前端没有正确调用 `setCustomDimension`
 - Matomo版本不支持自定义维度
@@ -364,7 +364,7 @@ cat data/evaluation/tracking_report_v2.json | jq '.summary | {ctr: .overall_ctr,
 
 ## 常见问题排查
 
-### Q1: Matomo数据库中没有custom_dimension_1列？
+### Q1: Matomo数据库中没有custom_dimension_3列？
 
 **原因**：Matomo自定义维度未配置
 
@@ -373,7 +373,7 @@ cat data/evaluation/tracking_report_v2.json | jq '.summary | {ctr: .overall_ctr,
 2. 重新按照步骤1配置自定义维度
 3. 配置后需要等新数据进来，旧数据不会有这个字段
 
-### Q2: custom_dimension_1列存在但都是NULL？
+### Q2: custom_dimension_3列存在但都是NULL？
 
 **原因**：前端没有正确调用setCustomDimension
 
@@ -425,11 +425,11 @@ python -c "
 import pandas as pd
 df = pd.read_parquet('data/matomo/matomo_log_link_visit_action.parquet')
 print('总点击数:', len(df))
-if 'custom_dimension_1' in df.columns:
-    with_rid = df[df['custom_dimension_1'].notna()]
+if 'custom_dimension_3' in df.columns:
+    with_rid = df[df['custom_dimension_3'].notna()]
     print('带request_id的点击:', len(with_rid))
 else:
-    print('custom_dimension_1列不存在')
+    print('custom_dimension_3列不存在')
 "
 ```
 
@@ -541,7 +541,7 @@ cat data/evaluation/tracking_report_v2.json | jq '.by_version'
 ### 部署后第1天
 
 - [ ] 手动测试完整流程（点击推荐）
-- [ ] Matomo数据库能看到custom_dimension_1数据
+- [ ] Matomo数据库能看到custom_dimension_3数据
 - [ ] 运行evaluate_v2.py生成首个报告
 - [ ] CTR在合理范围内（0.03-0.15）
 

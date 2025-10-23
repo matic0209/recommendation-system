@@ -33,7 +33,7 @@ USE matomo;
 -- 插入带request_id的点击记录
 INSERT INTO matomo_log_link_visit_action (
     idlink_va, idsite, idvisitor, idvisit,
-    idaction_url, server_time, custom_dimension_1
+    idaction_url, server_time, custom_dimension_3
 ) VALUES (
     999999,  -- 测试ID
     1,       -- 网站ID
@@ -107,7 +107,7 @@ def test_tracking():
         cur.execute("""
             INSERT INTO matomo_log_link_visit_action
             (idlink_va, idsite, idvisitor, idvisit, idaction_url,
-             server_time, custom_dimension_1)
+             server_time, custom_dimension_3)
             VALUES (999999, 1, UNHEX(MD5('test')), 999999, 999999,
                     NOW(), %s)
         """, (request_id,))
@@ -177,10 +177,10 @@ const API_URL = 'http://localhost:8090';
 
 4. **验证数据库**:
 ```sql
-SELECT custom_dimension_1, COUNT(*)
+SELECT custom_dimension_3, COUNT(*)
 FROM matomo_log_link_visit_action
-WHERE custom_dimension_1 LIKE 'req_%'
-GROUP BY custom_dimension_1
+WHERE custom_dimension_3 LIKE 'req_%'
+GROUP BY custom_dimension_3
 LIMIT 10;
 ```
 
@@ -195,7 +195,7 @@ python -m pipeline.evaluate_v2
 
 ### ✓ 准备阶段
 - [ ] 推荐API返回 request_id
-- [ ] Matomo有 custom_dimension_1 列
+- [ ] Matomo有 custom_dimension_3 列
 - [ ] evaluate_v2.py 脚本就绪
 
 ### ✓ 数据层验证
@@ -256,7 +256,7 @@ curl "http://your-matomo/matomo.php" \
 **Q: evaluate_v2.py 显示 "No clicks found"?**
 
 A: 检查：
-1. Matomo custom_dimension_1 有数据吗？
+1. Matomo custom_dimension_3 有数据吗？
 2. URL包含 `from=recommend` 吗？
 3. Request ID格式匹配吗？
 

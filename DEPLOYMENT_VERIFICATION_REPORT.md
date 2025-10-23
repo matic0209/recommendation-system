@@ -200,15 +200,15 @@ python -m pipeline.evaluate_v2
 **阶段2: 前端改造** (估计2-3天)
 - [ ] 前端保存API返回的request_id
 - [ ] 推荐链接添加追踪参数: `?from=recommend&rid={request_id}&pos={position}`
-- [ ] 点击时发送Matomo事件并设置custom_dimension_1
-- [ ] 购买时发送转化事件并设置custom_dimension_1
+- [ ] 点击时发送Matomo事件并设置custom_dimension_3
+- [ ] 购买时发送转化事件并设置custom_dimension_3
 
 **阶段3: 后端改造** (估计0.5-1天, 如适用)
 - [ ] 后端服务透传request_id给前端
 
 **阶段4: 联调测试** (估计1天)
 - [ ] 端到端测试: API → 前端渲染 → 点击 → Matomo记录
-- [ ] 验证Matomo数据库有custom_dimension_1数据
+- [ ] 验证Matomo数据库有custom_dimension_3数据
 - [ ] 运行evaluate_v2.py验证追踪覆盖率
 
 **阶段5: 灰度上线** (估计1天)

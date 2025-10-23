@@ -229,10 +229,10 @@ public CustomResponse getRecommendations(...) {
 SELECT * FROM matomo_custom_dimensions WHERE idsite = 1;
 
 -- 等前端埋点上线后，查看是否有数据
-SELECT custom_dimension_1, COUNT(*)
+SELECT custom_dimension_3, COUNT(*)
 FROM matomo_log_link_visit_action
-WHERE custom_dimension_1 IS NOT NULL
-GROUP BY custom_dimension_1
+WHERE custom_dimension_3 IS NOT NULL
+GROUP BY custom_dimension_3
 LIMIT 10;
 ```
 
@@ -255,7 +255,7 @@ LIMIT 10;
    - 调用推荐API → 获取request_id
    - 前端渲染推荐 → 链接包含参数
    - 点击推荐 → Matomo收到事件
-   - 推荐系统 → 数据库验证custom_dimension_1
+   - 推荐系统 → 数据库验证custom_dimension_3
 
 ### 阶段3: 灰度上线（第4天）
 
@@ -291,10 +291,10 @@ curl "http://localhost:8000/recommend/detail/1?user_id=123" | jq .request_id
 # - 查找Matomo请求，应包含 dimension1=req_xxx
 
 # 3. Matomo数据库验证（请Matomo管理员执行）
-SELECT custom_dimension_1, COUNT(*)
+SELECT custom_dimension_3, COUNT(*)
 FROM matomo_log_link_visit_action
-WHERE custom_dimension_1 LIKE 'req_%'
-GROUP BY custom_dimension_1
+WHERE custom_dimension_3 LIKE 'req_%'
+GROUP BY custom_dimension_3
 LIMIT 10;
 
 # 4. 推荐系统最终验证
@@ -326,7 +326,7 @@ cat data/evaluation/tracking_report_v2.json | jq '.summary'
 ### Q3: 如何验证改造成功？
 
 **A**: 三个指标：
-1. Matomo数据库有custom_dimension_1数据
+1. Matomo数据库有custom_dimension_3数据
 2. 推荐系统evaluate_v2.py能生成报告
 3. CTR降到合理范围（0.03-0.15）
 
