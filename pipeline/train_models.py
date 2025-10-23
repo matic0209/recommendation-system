@@ -254,14 +254,15 @@ def _prepare_ranking_dataset(
     merged["price_log"] = np.log1p(merged["price"].clip(lower=0.0))
     merged["weight_log"] = np.log1p(merged["total_weight"].clip(lower=0.0))
 
-    feature_columns = ["price_log", "description_length", "tag_count", "weight_log", "interaction_count"]
-    optional_columns = [
-        col
-        for col in ["image_richness_score", "image_embed_norm", "has_images", "has_cover"]
-        if col in merged.columns
-    ]
-    feature_columns.extend(optional_columns)
-    features = merged[feature_columns].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    base_columns = ["price_log", "description_length", "tag_count", "weight_log", "interaction_count"]
+    features = merged[base_columns].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+
+    optional_columns = ["image_richness_score", "image_embed_norm", "has_images", "has_cover"]
+    for col in optional_columns:
+        if col in merged.columns:
+            features[col] = pd.to_numeric(merged[col], errors="coerce").replace([np.inf, -np.inf], np.nan).fillna(0.0)
+        else:
+            features[col] = 0.0
     target = (merged["interaction_count"] > 0).astype(int)
     meta = merged[["dataset_id"]].reset_index(drop=True)
 
