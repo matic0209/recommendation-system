@@ -967,9 +967,9 @@ def _compute_ranking_features(
     features = pd.DataFrame(index=dataset_ids)
     features["price_log"] = np.log1p(selected["price"].clip(lower=0.0))
     features["description_length"] = selected["description_length"].fillna(0.0)
-   features["tag_count"] = selected["tag_count"].fillna(0.0)
-   features["weight_log"] = np.log1p(stats["total_weight"].clip(lower=0.0))
-   features["interaction_count"] = stats["interaction_count"].fillna(0.0)
+    features["tag_count"] = selected["tag_count"].fillna(0.0)
+    features["weight_log"] = np.log1p(stats["total_weight"].clip(lower=0.0))
+    features["interaction_count"] = stats["interaction_count"].fillna(0.0)
 
     optional_columns = ["image_richness_score", "image_embed_norm", "has_images", "has_cover"]
     for col in optional_columns:
