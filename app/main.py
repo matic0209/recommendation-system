@@ -151,7 +151,8 @@ DEFAULT_CHANNEL_WEIGHTS = {
 @app.middleware("http")
 async def request_context_middleware(request: Request, call_next):
     """Attach request ID and basic timing information to each request."""
-    request_id = request.headers.get(REQUEST_ID_HEADER) or str(uuid.uuid4())
+    raw_request_id = request.headers.get(REQUEST_ID_HEADER)
+    request_id = raw_request_id if raw_request_id and raw_request_id.startswith("req_") else f"req_{uuid.uuid4()}"
     request.state.request_id = request_id
     start_time = time.perf_counter()
     response = await call_next(request)
