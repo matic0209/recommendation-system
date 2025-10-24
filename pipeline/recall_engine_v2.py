@@ -751,10 +751,12 @@ def main() -> None:
     engine.models["price_bucket_index"] = price_bucket_index
 
     # 5. Faiss vector recall
-    if engine.faiss_vector_recall:
+    if engine.faiss_vector_recall and hasattr(engine.faiss_vector_recall, "train"):
         LOGGER.info("Training Faiss vector recall...")
         faiss_stats = engine.faiss_vector_recall.train(dataset_features)
         LOGGER.info("Faiss stats: %s", faiss_stats)
+    elif engine.faiss_vector_recall:
+        LOGGER.warning("Faiss vector recall object does not support training; skipping vector recall.")
 
     # Save models
     engine.save_models()
