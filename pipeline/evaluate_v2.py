@@ -15,7 +15,7 @@ import pandas as pd
 
 from config.settings import DATA_DIR, MODELS_DIR
 
-REQUEST_ID_DIMENSION = int(os.getenv("MATOMO_REQUEST_DIMENSION", "3"))
+REQUEST_ID_DIMENSION = int(os.getenv("MATOMO_REQUEST_DIMENSION", "2"))
 REQUEST_ID_COLUMN = f"custom_dimension_{REQUEST_ID_DIMENSION}"
 REQUEST_ID_COLUMNS: List[str] = []
 for candidate in [REQUEST_ID_COLUMN, "custom_dimension_3", "custom_dimension_1"]:
