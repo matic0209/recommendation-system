@@ -15,6 +15,13 @@ from sklearn.pipeline import Pipeline
 
 from config.settings import DATA_DIR, MODELS_DIR
 
+OPTIONAL_RANKING_COLUMNS = [
+    "image_richness_score",
+    "image_embed_norm",
+    "has_images",
+    "has_cover",
+]
+
 LOGGER = logging.getLogger(__name__)
 EVAL_DIR = DATA_DIR / "evaluation"
 EXPOSURE_LOG_PATH = EVAL_DIR / "exposure_log.jsonl"
@@ -386,19 +393,17 @@ def _load_raw_features() -> pd.DataFrame:
         return pd.DataFrame()
     frame = pd.read_parquet(path)
     base_columns = ["dataset_id", "price", "description", "tag"]
-    optional_columns = [
-        col
-        for col in ["image_richness_score", "image_embed_norm", "has_images", "has_cover"]
-        if col in frame.columns
-    ]
-    columns = [col for col in base_columns + optional_columns if col in frame.columns]
+    columns = [col for col in base_columns if col in frame.columns]
     subset = frame[columns].copy()
     subset["dataset_id"] = pd.to_numeric(subset.get("dataset_id"), errors="coerce").fillna(0).astype(int)
     subset["price"] = pd.to_numeric(subset.get("price"), errors="coerce").fillna(0.0)
     subset["description"] = subset.get("description", "").fillna("").astype(str)
     subset["tag"] = subset.get("tag", "").fillna("").astype(str)
-    for col in optional_columns:
-        subset[col] = pd.to_numeric(subset.get(col), errors="coerce").fillna(0.0)
+    for col in OPTIONAL_RANKING_COLUMNS:
+        if col in frame.columns:
+            subset[col] = pd.to_numeric(frame[col], errors="coerce").fillna(0.0)
+        else:
+            subset[col] = 0.0
     return subset
 
 
@@ -447,12 +452,6 @@ def _compute_ranking_features(
         lambda text: float(len([t for t in text.split(';') if t.strip()])) if isinstance(text, str) else 0.0
     )
 
-    optional_columns = [
-        col
-        for col in ["image_richness_score", "image_embed_norm", "has_images", "has_cover"]
-        if col in base.columns
-    ]
-
     if dataset_stats.empty:
         stats = pd.DataFrame(index=dataset_ids)
         stats["interaction_count"] = 0.0
@@ -462,13 +461,17 @@ def _compute_ranking_features(
         stats["interaction_count"] = pd.to_numeric(stats.get("interaction_count"), errors="coerce").fillna(0.0)
         stats["total_weight"] = pd.to_numeric(stats.get("total_weight"), errors="coerce").fillna(0.0)
 
+    for col in OPTIONAL_RANKING_COLUMNS:
+        if col not in base.columns:
+            base[col] = 0.0
+
     features = pd.DataFrame(index=dataset_ids)
     features["price_log"] = np.log1p(base["price"].clip(lower=0.0))
     features["description_length"] = base["description_length"].fillna(0.0)
     features["tag_count"] = base["tag_count"].fillna(0.0)
     features["weight_log"] = np.log1p(stats["total_weight"].clip(lower=0.0))
     features["interaction_count"] = stats["interaction_count"].fillna(0.0)
-    for col in optional_columns:
+    for col in OPTIONAL_RANKING_COLUMNS:
         features[col] = pd.to_numeric(base[col], errors="coerce").fillna(0.0)
     return features
 
