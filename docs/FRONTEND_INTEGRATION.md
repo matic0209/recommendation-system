@@ -161,13 +161,13 @@ function trackClick(event, element) {
 
 1. 登录Matomo管理后台
 2. 进入 `设置` > `网站` > `自定义维度`
-3. 新增访问级别（Visit scope）自定义维度：
+3. 新增动作级别（Action scope）自定义维度：
    - **维度ID**: 3
    - **名称**: `recommendation_request_id`
-   - **范围**: Visit
+   - **范围**: Action
    - **状态**: 激活
 
-配置完成后，Matomo会在 `log_link_visit_action` 表中记录 `custom_dimension_3` 字段。
+配置完成后，Matomo会在 `log_link_visit_action` 表中记录 `custom_dimension_3` 字段（Action scope 才会出现在点击级别数据中）。
 
 ---
 
