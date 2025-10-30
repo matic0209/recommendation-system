@@ -47,6 +47,11 @@ services:
       FEATURE_REDIS_URL: redis://redis:6379/1
       MLFLOW_TRACKING_URI: http://mlflow:5000
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # Sentry 监控配置
+      SENTRY_DSN: ${SENTRY_DSN}
+      SENTRY_ENVIRONMENT: ${SENTRY_ENVIRONMENT:-production}
+      SENTRY_TRACES_SAMPLE_RATE: ${SENTRY_TRACES_SAMPLE_RATE:-0.1}
+      SENTRY_PROFILES_SAMPLE_RATE: ${SENTRY_PROFILES_SAMPLE_RATE:-0.1}
       SENTENCE_TRANSFORMERS_HOME: /opt/recommend/cache/sentence-transformers
       HF_HOME: /opt/recommend/cache/huggingface
       TRANSFORMERS_CACHE: /opt/recommend/cache/huggingface/hub
@@ -146,6 +151,9 @@ services:
       AIRFLOW__CORE__LOAD_EXAMPLES: "False"
       REDIS_URL: redis://redis:6379/0
       FEATURE_REDIS_URL: redis://redis:6379/1
+      # Sentry 监控配置
+      SENTRY_DSN: ${SENTRY_DSN}
+      SENTRY_ENVIRONMENT: ${SENTRY_ENVIRONMENT:-production}
       PYTHONPATH: /opt/recommend
       MLFLOW_TRACKING_URI: http://mlflow:5000
       SENTENCE_TRANSFORMERS_HOME: /opt/recommend/cache/sentence-transformers
@@ -186,6 +194,9 @@ services:
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres-airflow/airflow
       REDIS_URL: redis://redis:6379/0
       FEATURE_REDIS_URL: redis://redis:6379/1
+      # Sentry 监控配置
+      SENTRY_DSN: ${SENTRY_DSN}
+      SENTRY_ENVIRONMENT: ${SENTRY_ENVIRONMENT:-production}
       PYTHONPATH: /opt/recommend
       MLFLOW_TRACKING_URI: http://mlflow:5000
       SENTENCE_TRANSFORMERS_HOME: /opt/recommend/cache/sentence-transformers
