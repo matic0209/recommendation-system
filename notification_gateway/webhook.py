@@ -53,7 +53,8 @@ def get_access_token():
     """获取企业微信 access_token"""
     url = f'https://qyapi.weixin.qq.com/cgi-bin/gettoken?corpid={CORP_ID}&corpsecret={CORP_SECRET}'
     try:
-        response = requests.get(url, timeout=10)
+        # 禁用代理，直接访问企业微信 API
+        response = requests.get(url, timeout=10, proxies={'http': None, 'https': None})
         result = response.json()
         if result.get('errcode') == 0:
             logger.info("成功获取企业微信 access_token")
@@ -113,7 +114,8 @@ def send_weixin_message(user_id, message):
     }
 
     try:
-        response = requests.post(url, json=data, timeout=10)
+        # 禁用代理，直接访问企业微信 API
+        response = requests.post(url, json=data, timeout=10, proxies={'http': None, 'https': None})
         result = response.json()
         if result.get('errcode') == 0:
             logger.info(f"消息发送成功到用户 {user_id}")

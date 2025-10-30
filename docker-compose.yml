@@ -268,10 +268,8 @@ services:
       TRANSFORMERS_CACHE: /opt/recommend/cache/huggingface/hub
       CLIP_MODEL_PATH: /opt/recommend/cache/sentence-transformers/clip-ViT-B-32
       HF_HUB_OFFLINE: "1"
-    ports:
-      - "${NOTIFICATION_GATEWAY_HOST_PORT:-9000}:9000"
-    networks:
-      - recommend-net
+    # 使用宿主机网络，绕过企业微信 IP 白名单限制
+    network_mode: host
     volumes:
       - /opt/recommend/cache/sentence-transformers:/opt/recommend/cache/sentence-transformers
       - /opt/recommend/cache/huggingface:/opt/recommend/cache/huggingface
