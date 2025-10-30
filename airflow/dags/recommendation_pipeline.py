@@ -13,9 +13,69 @@ Airflow DAG：推荐系统端到端流水线。
 """
 
 from datetime import datetime, timedelta
+import os
+import sys
 
 from airflow import DAG
 from airflow.operators.bash import BashOperator
+from airflow.operators.python import PythonOperator
+
+# 初始化 Sentry（如果配置了）
+sys.path.insert(0, '/opt/recommend')
+try:
+    from app.sentry_config import init_sentry
+    sentry_initialized = init_sentry(
+        service_name="airflow-scheduler",
+        enable_tracing=True,
+        traces_sample_rate=0.5,  # Airflow 任务较少，使用更高采样率
+    )
+    if sentry_initialized:
+        print("Sentry initialized for Airflow DAG")
+except ImportError:
+    print("Sentry integration not available")
+    sentry_initialized = False
+
+def task_failure_callback(context):
+    """Airflow 任务失败时的回调，发送错误到 Sentry"""
+    if not sentry_initialized:
+        return
+
+    try:
+        import sentry_sdk
+        from app.sentry_config import capture_exception_with_context
+
+        task_instance = context.get('task_instance')
+        exception = context.get('exception')
+
+        # 设置任务上下文
+        with sentry_sdk.configure_scope() as scope:
+            scope.set_tag("dag_id", context.get('dag').dag_id)
+            scope.set_tag("task_id", task_instance.task_id)
+            scope.set_tag("execution_date", str(context.get('execution_date')))
+            scope.set_context("airflow", {
+                "dag_id": context.get('dag').dag_id,
+                "task_id": task_instance.task_id,
+                "execution_date": str(context.get('execution_date')),
+                "try_number": task_instance.try_number,
+            })
+
+        if exception:
+            capture_exception_with_context(
+                exception,
+                level="error",
+                fingerprint=["airflow", context.get('dag').dag_id, task_instance.task_id],
+                dag_id=context.get('dag').dag_id,
+                task_id=task_instance.task_id,
+                execution_date=str(context.get('execution_date')),
+            )
+        else:
+            sentry_sdk.capture_message(
+                f"Airflow task failed: {task_instance.task_id}",
+                level="error",
+            )
+    except Exception as e:
+        print(f"Failed to send error to Sentry: {e}")
+
 
 DEFAULT_ARGS = {
     "owner": "recsys",
@@ -24,6 +84,7 @@ DEFAULT_ARGS = {
     "email_on_retry": False,
     "retries": 1,
     "retry_delay": timedelta(minutes=10),
+    "on_failure_callback": task_failure_callback,
 }
 
 with DAG(

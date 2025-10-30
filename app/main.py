@@ -49,6 +49,14 @@ from app.metrics import (
     recommendation_timeouts_total,
     thread_pool_queue_gauge,
 )
+from app.sentry_config import (
+    init_sentry,
+    set_user_context,
+    set_request_context,
+    set_recommendation_context,
+    capture_exception_with_context,
+    add_breadcrumb,
+)
 
 EXECUTOR_MAX_WORKERS = int(os.getenv("RECO_THREAD_POOL_WORKERS", "4"))
 EXECUTOR = ThreadPoolExecutor(max_workers=EXECUTOR_MAX_WORKERS)
@@ -154,6 +162,24 @@ async def request_context_middleware(request: Request, call_next):
     raw_request_id = request.headers.get(REQUEST_ID_HEADER)
     request_id = raw_request_id if raw_request_id and raw_request_id.startswith("req_") else f"req_{uuid.uuid4()}"
     request.state.request_id = request_id
+
+    # 设置 Sentry 请求上下文
+    endpoint = request.url.path
+    set_request_context(
+        request_id=request_id,
+        endpoint=endpoint,
+        method=request.method,
+        url=str(request.url),
+    )
+
+    # 添加面包屑
+    add_breadcrumb(
+        message=f"{request.method} {endpoint}",
+        category="http.request",
+        level="info",
+        data={"request_id": request_id},
+    )
+
     start_time = time.perf_counter()
     response = await call_next(request)
     duration = time.perf_counter() - start_time
@@ -1069,6 +1095,18 @@ def _get_app_state():
 def load_models() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
+    # Initialize Sentry
+    sentry_enabled = init_sentry(
+        service_name="recommendation-api",
+        enable_tracing=True,
+        traces_sample_rate=0.1,  # 10% 采样率
+        profiles_sample_rate=0.1,
+    )
+    if sentry_enabled:
+        LOGGER.info("Sentry monitoring enabled for recommendation-api")
+    else:
+        LOGGER.warning("Sentry monitoring disabled (SENTRY_DSN not configured)")
+
     # Initialize cache
     cache = get_cache()
     if cache and cache.enabled:
@@ -1236,6 +1274,14 @@ async def get_similar(
     cache = getattr(state, "cache", None)
     channel_weights = DEFAULT_CHANNEL_WEIGHTS.copy()
 
+    # 设置 Sentry 上下文
+    set_request_context(
+        request_id=request_id,
+        endpoint=endpoint,
+        dataset_id=dataset_id,
+        limit=limit,
+    )
+
     try:
         if cache and cache.enabled:
             cache_key = f"similar:{dataset_id}:{limit}"
@@ -1306,6 +1352,15 @@ async def get_similar(
             recommendation_timeouts_total.labels(endpoint=endpoint, operation="total").inc()
             LOGGER.warning("Similar request timed out (dataset=%s, request=%s)", dataset_id, request_id)
             degrade_reason = "timeout"
+
+            # Sentry: 记录超时事件
+            add_breadcrumb(
+                message=f"Recommendation timeout for dataset {dataset_id}",
+                category="timeout",
+                level="warning",
+                data={"dataset_id": dataset_id, "request_id": request_id},
+            )
+
             items, reasons, degrade_reason = _serve_fallback(
                 state,
                 dataset_id=dataset_id,
@@ -1320,6 +1375,17 @@ async def get_similar(
                 "Error in get_similar (dataset=%s, request=%s): %s", dataset_id, request_id, exc
             )
             degrade_reason = "error"
+
+            # Sentry: 捕获异常
+            capture_exception_with_context(
+                exc,
+                level="error",
+                fingerprint=["get_similar", type(exc).__name__],
+                dataset_id=dataset_id,
+                request_id=request_id,
+                endpoint=endpoint,
+            )
+
             items, reasons, degrade_reason = _serve_fallback(
                 state,
                 dataset_id=dataset_id,
@@ -1359,6 +1425,15 @@ async def get_similar(
             similar_items=items[:limit],
             request_id=request_id,
             algorithm_version=run_id
+        )
+
+        # 设置推荐上下文到 Sentry
+        set_recommendation_context(
+            algorithm_version=run_id,
+            variant=variant,
+            experiment_variant=None,
+            degrade_reason=degrade_reason,
+            channel_weights=channel_weights,
         )
 
         _log_exposure(
@@ -1440,6 +1515,16 @@ async def recommend_for_detail(
             channel = key.replace("_weight", "")
             channel_weights[channel] = float(value)
 
+    # 设置 Sentry 上下文
+    set_request_context(
+        request_id=request_id,
+        endpoint=endpoint,
+        dataset_id=dataset_id,
+        limit=limit,
+    )
+    if user_id:
+        set_user_context(user_id)
+
     try:
         if cache and cache.enabled and user_id:
             cache_key = f"recommend:{dataset_id}:{user_id}:{limit}"
@@ -1513,6 +1598,15 @@ async def recommend_for_detail(
                 request_id,
             )
             degrade_reason = "timeout"
+
+            # Sentry: 记录超时事件
+            add_breadcrumb(
+                message=f"Recommendation timeout for dataset {dataset_id}, user {user_id}",
+                category="timeout",
+                level="warning",
+                data={"dataset_id": dataset_id, "user_id": user_id, "request_id": request_id},
+            )
+
             items, reasons, degrade_reason = _serve_fallback(
                 state,
                 dataset_id=dataset_id,
@@ -1532,6 +1626,19 @@ async def recommend_for_detail(
                 exc,
             )
             degrade_reason = "error"
+
+            # Sentry: 捕获异常
+            capture_exception_with_context(
+                exc,
+                level="error",
+                fingerprint=["recommend_for_detail", type(exc).__name__],
+                dataset_id=dataset_id,
+                user_id=user_id,
+                request_id=request_id,
+                endpoint=endpoint,
+                experiment_variant=experiment_variant,
+            )
+
             items, reasons, degrade_reason = _serve_fallback(
                 state,
                 dataset_id=dataset_id,
@@ -1574,6 +1681,15 @@ async def recommend_for_detail(
             recommendations=items[:limit],
             request_id=request_id,
             algorithm_version=run_id
+        )
+
+        # 设置推荐上下文到 Sentry
+        set_recommendation_context(
+            algorithm_version=run_id,
+            variant=variant,
+            experiment_variant=experiment_variant,
+            degrade_reason=degrade_reason,
+            channel_weights=channel_weights,
         )
 
         _log_exposure(

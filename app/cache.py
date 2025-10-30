@@ -13,6 +13,17 @@ from redis.exceptions import ConnectionError, RedisError, TimeoutError
 
 LOGGER = logging.getLogger(__name__)
 
+# 延迟导入 Sentry 以避免循环依赖
+def _get_sentry_funcs():
+    try:
+        from app.sentry_config import (
+            capture_exception_with_context,
+            add_breadcrumb,
+        )
+        return capture_exception_with_context, add_breadcrumb
+    except ImportError:
+        return None, None
+
 
 class RedisCache:
     """Redis cache manager with fallback support."""
@@ -50,10 +61,35 @@ class RedisCache:
             LOGGER.warning("Redis connection failed: %s. Cache disabled.", exc)
             self.enabled = False
             self.client = None
+
+            # Sentry: 记录 Redis 连接失败
+            capture_exc, add_bc = _get_sentry_funcs()
+            if capture_exc:
+                capture_exc(
+                    exc,
+                    level="warning",
+                    fingerprint=["redis", "connection_failed"],
+                    redis_host=host,
+                    redis_port=port,
+                    redis_db=db,
+                    error_type=type(exc).__name__,
+                )
         except Exception as exc:  # noqa: BLE001
             LOGGER.error("Unexpected error connecting to Redis: %s", exc)
             self.enabled = False
             self.client = None
+
+            # Sentry: 记录意外的 Redis 错误
+            capture_exc, add_bc = _get_sentry_funcs()
+            if capture_exc:
+                capture_exc(
+                    exc,
+                    level="error",
+                    fingerprint=["redis", "unexpected_error"],
+                    redis_host=host,
+                    redis_port=port,
+                    redis_db=db,
+                )
 
     def get(self, key: str) -> Optional[str]:
         """Get value from cache."""

@@ -13,6 +13,14 @@ from config.settings import MODEL_REGISTRY_PATH, MODELS_DIR
 LOGGER = logging.getLogger(__name__)
 STAGING_DIR = MODELS_DIR / "staging"
 
+# 延迟导入 Sentry
+def _get_sentry_funcs():
+    try:
+        from app.sentry_config import capture_exception_with_context, add_breadcrumb
+        return capture_exception_with_context, add_breadcrumb
+    except ImportError:
+        return None, None
+
 
 @dataclass
 class ModelVersion:
@@ -25,8 +33,19 @@ def load_registry() -> dict:
         return {"current": None, "history": []}
     try:
         return json.loads(MODEL_REGISTRY_PATH.read_text())
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as exc:
         LOGGER.warning("Failed to parse model registry at %s", MODEL_REGISTRY_PATH)
+
+        # Sentry: 记录模型注册表解析失败
+        capture_exc, _ = _get_sentry_funcs()
+        if capture_exc:
+            capture_exc(
+                exc,
+                level="warning",
+                fingerprint=["model", "registry_parse_failed"],
+                registry_path=str(MODEL_REGISTRY_PATH),
+            )
+
         return {"current": None, "history": []}
 
 
@@ -65,20 +84,68 @@ def stage_new_model(source_dir: Path) -> Path:
 
 def deploy_from_source(source_dir: Path) -> None:
     source_dir = source_dir.resolve()
+
+    # Sentry: 添加面包屑
+    _, add_bc = _get_sentry_funcs()
+    if add_bc:
+        add_bc(
+            message=f"Starting model deployment from {source_dir}",
+            category="model",
+            level="info",
+            source_dir=str(source_dir),
+        )
+
     if not source_dir.exists():
-        raise FileNotFoundError(f"Source directory {source_dir} does not exist")
-    MODELS_DIR.mkdir(parents=True, exist_ok=True)
-    for item in source_dir.iterdir():
-        target = MODELS_DIR / item.name
-        if item.is_dir():
-            if target.exists():
-                shutil.rmtree(target)
-            shutil.copytree(item, target)
-        else:
-            if target.exists():
-                target.unlink()
-            shutil.copy2(item, target)
-    LOGGER.info("Deployed model artifacts from %s to %s", source_dir, MODELS_DIR)
+        error = FileNotFoundError(f"Source directory {source_dir} does not exist")
+
+        # Sentry: 记录模型源目录不存在
+        capture_exc, _ = _get_sentry_funcs()
+        if capture_exc:
+            capture_exc(
+                error,
+                level="error",
+                fingerprint=["model", "source_not_found"],
+                source_dir=str(source_dir),
+            )
+
+        raise error
+
+    try:
+        MODELS_DIR.mkdir(parents=True, exist_ok=True)
+        for item in source_dir.iterdir():
+            target = MODELS_DIR / item.name
+            if item.is_dir():
+                if target.exists():
+                    shutil.rmtree(target)
+                shutil.copytree(item, target)
+            else:
+                if target.exists():
+                    target.unlink()
+                shutil.copy2(item, target)
+        LOGGER.info("Deployed model artifacts from %s to %s", source_dir, MODELS_DIR)
+
+        # Sentry: 记录成功部署
+        if add_bc:
+            add_bc(
+                message=f"Model deployment successful",
+                category="model",
+                level="info",
+                source_dir=str(source_dir),
+                target_dir=str(MODELS_DIR),
+            )
+
+    except Exception as exc:
+        # Sentry: 记录模型部署失败
+        capture_exc, _ = _get_sentry_funcs()
+        if capture_exc:
+            capture_exc(
+                exc,
+                level="error",
+                fingerprint=["model", "deployment_failed"],
+                source_dir=str(source_dir),
+                target_dir=str(MODELS_DIR),
+            )
+        raise
 
 
 __all__ = [

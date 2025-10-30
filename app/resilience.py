@@ -16,6 +16,14 @@ LOGGER = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
+# 延迟导入 Sentry
+def _get_sentry_funcs():
+    try:
+        from app.sentry_config import capture_exception_with_context, add_breadcrumb
+        return capture_exception_with_context, add_breadcrumb
+    except ImportError:
+        return None, None
+
 
 @dataclass
 class FallbackResult:
@@ -67,6 +75,16 @@ class FallbackStrategy:
         except Exception as exc:  # noqa: BLE001
             LOGGER.warning("Failed to load precomputed recommendations: %s", exc)
 
+            # Sentry: 记录预计算数据加载失败
+            capture_exc, _ = _get_sentry_funcs()
+            if capture_exc:
+                capture_exc(
+                    exc,
+                    level="warning",
+                    fingerprint=["fallback", "precomputed_load_failed"],
+                    precomputed_dir=str(self.precomputed_dir) if self.precomputed_dir else None,
+                )
+
     def get_recommendations(
         self,
         dataset_id: int,
@@ -99,6 +117,8 @@ class FallbackStrategy:
         user_id: Optional[int] = None,
     ) -> FallbackResult:
         """Same as get_recommendations but with metadata about source level."""
+        _, add_bc = _get_sentry_funcs()
+
         # Level 1: Try Redis cache
         if self.cache and self.cache.enabled:
             try:
@@ -114,15 +134,48 @@ class FallbackStrategy:
             except Exception as exc:  # noqa: BLE001
                 LOGGER.warning("Redis fallback failed: %s", exc)
 
+                # Sentry: 记录 Redis 降级失败（只有在启用时才记录）
+                if add_bc:
+                    add_bc(
+                        message="Redis fallback failed, trying next level",
+                        category="fallback",
+                        level="warning",
+                        dataset_id=dataset_id,
+                        error=str(exc),
+                    )
+
         # Level 2: Try precomputed results
         if dataset_id in self.precomputed_cache:
             LOGGER.debug("Fallback Level 2 (Precomputed): dataset_id=%s", dataset_id)
+
+            # Sentry: 记录使用了预计算降级（说明 Redis 不可用）
+            if add_bc:
+                add_bc(
+                    message="Using precomputed fallback (Level 2)",
+                    category="fallback",
+                    level="info",
+                    dataset_id=dataset_id,
+                    user_id=user_id,
+                )
+
             return FallbackResult(
                 self.precomputed_cache[dataset_id][:limit], level=2, source="precomputed"
             )
 
         # Level 3: Return static popular items
         LOGGER.debug("Fallback Level 3 (Popular): dataset_id=%s", dataset_id)
+
+        # Sentry: 记录使用了最终降级（这是严重的问题）
+        if add_bc:
+            add_bc(
+                message="Using static popular fallback (Level 3) - all other sources failed",
+                category="fallback",
+                level="warning",
+                dataset_id=dataset_id,
+                user_id=user_id,
+                static_popular_count=len(self.static_popular),
+            )
+
         items = [item for item in self.static_popular if item != dataset_id][:limit]
         return FallbackResult(items, level=3, source="popular")
 
