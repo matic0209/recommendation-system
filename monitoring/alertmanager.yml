@@ -15,11 +15,11 @@ route:
 receivers:
   - name: "default"
     webhook_configs:
-      - url: "http://notification-gateway:9000/webhook/recommend-default"
+      - url: "http://host.docker.internal:9000/webhook/recommend-default"
         send_resolved: true
   - name: "data-quality"
     webhook_configs:
-      - url: "http://notification-gateway:9000/webhook/data-quality"
+      - url: "http://host.docker.internal:9000/webhook/data-quality"
         send_resolved: true
 
 inhibit_rules:

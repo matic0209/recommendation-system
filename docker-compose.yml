@@ -242,6 +242,8 @@ services:
       - "--config.file=/etc/alertmanager/alertmanager.yml"
     ports:
       - "${ALERTMANAGER_HOST_PORT:-9093}:9093"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     networks:
       - recommend-net
 
