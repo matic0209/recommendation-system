@@ -317,6 +317,7 @@ def _load_exposure_log() -> pd.DataFrame:
         ])
 
     records: List[Dict[str, object]] = []
+    dropped_no_prefix = 0
     with EXPOSURE_LOG_PATH.open(encoding="utf-8") as stream:
         for line in stream:
             line = line.strip()
@@ -334,6 +335,17 @@ def _load_exposure_log() -> pd.DataFrame:
             if not request_id:
                 LOGGER.warning("Exposure log entry missing request_id")
                 continue
+            if not str(request_id).startswith("req_"):
+                dropped_no_prefix += 1
+                continue
+
+            context = payload.get("context") or {}
+            endpoint = context.get("endpoint")
+            variant = context.get("variant")
+            experiment_variant = context.get("experiment_variant")
+            degrade_reason = context.get("degrade_reason")
+            model_run_id = context.get("model_run_id")
+            feature_snapshot_id = context.get("feature_snapshot_id")
 
             for idx, item in enumerate(items):
                 dataset_id = item.get("dataset_id")
@@ -352,6 +364,12 @@ def _load_exposure_log() -> pd.DataFrame:
                     "algorithm_version": payload.get("algorithm_version"),
                     "user_id": payload.get("user_id"),
                     "page_id": payload.get("page_id"),
+                    "endpoint": endpoint,
+                    "variant": variant,
+                    "experiment_variant": experiment_variant,
+                    "degrade_reason": degrade_reason,
+                    "model_run_id": model_run_id,
+                    "feature_snapshot_id": feature_snapshot_id,
                     "dataset_id": dataset_id,
                     "score": score,
                     "reason": item.get("reason"),
@@ -363,13 +381,15 @@ def _load_exposure_log() -> pd.DataFrame:
         LOGGER.warning("No exposure records found")
         return pd.DataFrame(columns=[
             "request_id", "algorithm_version", "user_id", "page_id",
+            "endpoint", "variant", "experiment_variant", "degrade_reason",
+            "model_run_id", "feature_snapshot_id",
             "dataset_id", "score", "reason", "timestamp", "position"
         ])
 
     df = pd.DataFrame.from_records(records)
     df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
-    LOGGER.info("Loaded %d exposure records with %d unique request_ids",
-                len(df), df["request_id"].nunique())
+    LOGGER.info("Loaded %d exposure records with %d unique request_ids (dropped %d without 'req_' prefix)",
+                len(df), df["request_id"].nunique(), dropped_no_prefix)
     return df
 
 

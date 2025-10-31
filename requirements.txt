@@ -21,6 +21,7 @@ hiredis==2.2.3
 prometheus-client==0.19.0
 structlog==24.1.0
 sentry-sdk[fastapi]==2.18.0
+Jinja2>=3.1.0
 
 # Circuit breaker and resilience
 circuitbreaker==1.4.0

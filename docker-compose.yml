@@ -40,6 +40,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    image: recommend-recommendation-api
     container_name: recommendation-api
     <<: *default-env
     environment:
@@ -78,6 +79,34 @@ services:
       timeout: 5s
       retries: 3
       start_period: 15s
+    networks:
+      - recommend-net
+
+  report-viewer:
+    image: recommend-recommendation-api
+    container_name: report-viewer
+    <<: *default-env
+    environment:
+      DAILY_REPORT_DIR: /app/data/evaluation/daily_reports
+    command:
+      [
+        "/opt/venv/bin/uvicorn",
+        "report_viewer.app:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8800",
+      ]
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    ports:
+      - "${REPORT_VIEWER_HOST_PORT:-8800}:8800"
+    depends_on:
+      recommendation-api:
+        condition: service_started
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     networks:
       - recommend-net
 
