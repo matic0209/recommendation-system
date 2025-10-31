@@ -1219,6 +1219,82 @@ def metrics() -> Response:
     return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
+@app.get("/test-sentry")
+def test_sentry(error_type: str = "exception") -> Dict[str, Any]:
+    """
+    测试 Sentry 错误捕获的端点（仅用于测试）
+
+    参数:
+    - error_type: 错误类型 (exception, message, warning)
+
+    示例:
+    - GET /test-sentry?error_type=exception  # 触发异常
+    - GET /test-sentry?error_type=message    # 发送消息
+    - GET /test-sentry?error_type=warning    # 发送警告
+    """
+    try:
+        from app.sentry_config import capture_exception_with_context, capture_message_with_context
+
+        if error_type == "exception":
+            # 触发一个测试异常
+            try:
+                raise ValueError("Sentry 测试异常：这是一个用于测试监控的错误")
+            except ValueError as e:
+                capture_exception_with_context(
+                    e,
+                    level="error",
+                    fingerprint=["test", "sentry", "exception"],
+                    test_trigger=True,
+                    endpoint="/test-sentry",
+                )
+                return {
+                    "status": "error_captured",
+                    "message": "测试异常已发送到 Sentry",
+                    "error_type": error_type,
+                }
+
+        elif error_type == "message":
+            # 发送测试消息
+            capture_message_with_context(
+                "Sentry 测试消息：监控系统运行正常",
+                level="info",
+                test_trigger=True,
+                endpoint="/test-sentry",
+            )
+            return {
+                "status": "message_sent",
+                "message": "测试消息已发送到 Sentry",
+                "error_type": error_type,
+            }
+
+        elif error_type == "warning":
+            # 发送警告
+            capture_message_with_context(
+                "Sentry 测试警告：这是一个测试警告",
+                level="warning",
+                test_trigger=True,
+                endpoint="/test-sentry",
+            )
+            return {
+                "status": "warning_sent",
+                "message": "测试警告已发送到 Sentry",
+                "error_type": error_type,
+            }
+
+        else:
+            return {
+                "status": "invalid_type",
+                "message": f"未知的错误类型: {error_type}",
+                "supported_types": ["exception", "message", "warning"],
+            }
+
+    except ImportError:
+        return {
+            "status": "sentry_not_available",
+            "message": "Sentry 未配置或不可用",
+        }
+
+
 @app.get("/hot/trending")
 def get_trending(
     limit: int = Query(20, ge=1, le=100),
