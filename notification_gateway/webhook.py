@@ -4,16 +4,19 @@ Notification Gateway for Alertmanager
 接收 Alertmanager 的告警通知并转发到企业微信
 """
 
-import os
-import sys
 import json
-import requests
-from flask import Flask, request, jsonify
-from datetime import datetime
 import logging
+import os
+from datetime import datetime
 
-# 添加项目路径以导入 Sentry 配置
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import requests
+from flask import Flask, jsonify, request
+
+from sentry_helper import (
+    capture_exception_with_context,
+    capture_message_with_context,
+    init_sentry,
+)
 
 # 配置日志
 logging.basicConfig(
@@ -24,19 +27,14 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-# 初始化 Sentry（如果可用）
-try:
-    from app.sentry_config import init_sentry
-    sentry_enabled = init_sentry(
-        service_name="notification-gateway",
-        enable_tracing=True,
-        traces_sample_rate=0.5,
-    )
-    if sentry_enabled:
-        logger.info("Sentry监控已启用")
-except ImportError:
-    logger.warning("Sentry SDK 未安装，监控功能不可用")
-    sentry_enabled = False
+# 初始化 Sentry
+sentry_enabled = init_sentry(
+    service_name="notification-gateway",
+    traces_sample_rate=0.5,
+    profiles_sample_rate=0.5,
+)
+if sentry_enabled:
+    logger.info("Sentry监控已启用")
 
 # 从环境变量读取企业微信配置
 CORP_ID = os.getenv('WEIXIN_CORP_ID', '')
@@ -64,16 +62,12 @@ def get_access_token():
 
             # Sentry: 记录获取 token 失败
             if sentry_enabled:
-                try:
-                    from app.sentry_config import capture_message_with_context
-                    capture_message_with_context(
-                        f"企业微信 token 获取失败: errcode={result.get('errcode')}",
-                        level="error",
-                        error_code=result.get('errcode'),
-                        error_message=result.get('errmsg'),
-                    )
-                except ImportError:
-                    pass
+                capture_message_with_context(
+                    f"企业微信 token 获取失败: errcode={result.get('errcode')}",
+                    level="error",
+                    error_code=result.get('errcode'),
+                    error_message=result.get('errmsg'),
+                )
 
             return None
     except Exception as e:
@@ -81,16 +75,12 @@ def get_access_token():
 
         # Sentry: 记录获取 token 异常
         if sentry_enabled:
-            try:
-                from app.sentry_config import capture_exception_with_context
-                capture_exception_with_context(
-                    e,
-                    level="error",
-                    fingerprint=["weixin", "get_access_token_failed"],
-                    corp_id=CORP_ID[:8] + "***",  # 脱敏
-                )
-            except ImportError:
-                pass
+            capture_exception_with_context(
+                e,
+                level="error",
+                fingerprint=["weixin", "get_access_token_failed"],
+                corp_id=CORP_ID[:8] + "***",  # 脱敏
+            )
 
         return None
 
@@ -125,18 +115,14 @@ def send_weixin_message(user_id, message):
 
             # Sentry: 记录消息发送失败
             if sentry_enabled:
-                try:
-                    from app.sentry_config import capture_message_with_context
-                    capture_message_with_context(
-                        f"企业微信消息发送失败: errcode={result.get('errcode')}",
-                        level="warning",
-                        user_id=user_id,
-                        error_code=result.get('errcode'),
-                        error_message=result.get('errmsg'),
-                        message_preview=message[:100] if len(message) > 100 else message,
-                    )
-                except ImportError:
-                    pass
+                capture_message_with_context(
+                    f"企业微信消息发送失败: errcode={result.get('errcode')}",
+                    level="warning",
+                    user_id=user_id,
+                    error_code=result.get('errcode'),
+                    error_message=result.get('errmsg'),
+                    message_preview=message[:100] if len(message) > 100 else message,
+                )
 
             return False
     except Exception as e:
@@ -144,17 +130,13 @@ def send_weixin_message(user_id, message):
 
         # Sentry: 记录消息发送异常
         if sentry_enabled:
-            try:
-                from app.sentry_config import capture_exception_with_context
-                capture_exception_with_context(
-                    e,
-                    level="error",
-                    fingerprint=["weixin", "send_message_failed"],
-                    user_id=user_id,
-                    message_preview=message[:100] if len(message) > 100 else message,
-                )
-            except ImportError:
-                pass
+            capture_exception_with_context(
+                e,
+                level="error",
+                fingerprint=["weixin", "send_message_failed"],
+                user_id=user_id,
+                message_preview=message[:100] if len(message) > 100 else message,
+            )
 
         return False
 
@@ -379,16 +361,12 @@ def sentry_webhook():
 
         # Sentry: 记录处理失败
         if sentry_enabled:
-            try:
-                from app.sentry_config import capture_exception_with_context
-                capture_exception_with_context(
-                    e,
-                    level="error",
-                    fingerprint=["notification", "sentry_webhook_failed"],
-                    webhook_source="sentry",
-                )
-            except ImportError:
-                pass
+            capture_exception_with_context(
+                e,
+                level="error",
+                fingerprint=["notification", "sentry_webhook_failed"],
+                webhook_source="sentry",
+            )
 
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
