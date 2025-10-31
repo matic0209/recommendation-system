@@ -1,6 +1,7 @@
 # Daily Recommendation Report Viewer
 
-Use the lightweight FastAPI service in `report_viewer/app.py` to browse the HTML/JSON reports produced by `pipeline.daily_report`.
+Use the lightweight FastAPI service in `report_viewer/app.py` to browse the daily recommendation reports that `pipeline.daily_report` writes as JSON.  
+The viewer renders the latest JSON on the fly并提供图表，无需额外生成 HTML 文件。
 
 ## Prerequisites
 
@@ -16,7 +17,7 @@ uvicorn report_viewer.app:app --host 0.0.0.0 --port 8800
 ```
 
 Then open <http://localhost:8800>.  
-The viewer lists available HTML & JSON files; clicking “Open” renders the HTML report directly.
+The home page自动加载最新日报，并允许切换历史日期。右上角“Download JSON”可获取原始数据。
 
 ## Via Docker Compose
 
@@ -34,7 +35,7 @@ docker compose up -d report-viewer
 
 ```bash
 docker exec -it recommendation-api \
-  /opt/venv/bin/uvicorn report_viewer.app:app --host 0.0.0.0 --port 8800
+  uvicorn report_viewer.app:app --host 0.0.0.0 --port 8800
 ```
 
 若用 `docker run` 单独启动，请映射端口 `-p 8800:8800`。

@@ -10,9 +10,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Any
 
 import pandas as pd
-from jinja2 import Environment, FileSystemLoader, select_autoescape
-
-from config.settings import BASE_DIR, DATA_DIR
+from config.settings import DATA_DIR
 from pipeline.evaluate_v2 import (
     _compute_request_id_metrics,
     _load_actions,
@@ -25,10 +23,6 @@ LOGGER = logging.getLogger(__name__)
 
 REPORT_DIR = DATA_DIR / "evaluation" / "daily_reports"
 REPORT_DIR.mkdir(parents=True, exist_ok=True)
-
-TEMPLATE_DIR = BASE_DIR / "templates"
-TEMPLATE_FILE = "recommendation_daily_report.html.j2"
-
 
 @dataclass
 class HistoryPoint:
@@ -307,25 +301,6 @@ def _write_json(report: Dict[str, Any], target_day: date) -> Path:
     return output_path
 
 
-def _render_html(report: Dict[str, Any], target_day: date) -> Path:
-    template_path = TEMPLATE_DIR / TEMPLATE_FILE
-    if not template_path.exists():
-        LOGGER.warning("Template %s not found; skipping HTML generation", template_path)
-        return template_path
-
-    env = Environment(
-        loader=FileSystemLoader(str(TEMPLATE_DIR)),
-        autoescape=select_autoescape(["html", "xml"]),
-    )
-    template = env.get_template(TEMPLATE_FILE)
-    chart_data_json = json.dumps(report.get("history_chart", []))
-    html = template.render(report=report, chart_data_json=chart_data_json)
-
-    output_path = REPORT_DIR / f"recommendation_report_{target_day.isoformat()}.html"
-    output_path.write_text(html, encoding="utf-8")
-    return output_path
-
-
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
@@ -345,10 +320,6 @@ def main() -> None:
     report = generate_daily_report(target_day)
     json_path = _write_json(report, target_day)
     LOGGER.info("Daily recommendation JSON report saved to %s", json_path)
-
-    html_path = _render_html(report, target_day)
-    if html_path.exists():
-        LOGGER.info("Daily recommendation HTML report saved to %s", html_path)
 
 
 if __name__ == "__main__":

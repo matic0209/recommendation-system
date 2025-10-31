@@ -39,7 +39,6 @@ COPY config/ /app/config/
 COPY pipeline/ /app/pipeline/
 COPY data/ /app/data/
 COPY models/ /app/models/
-COPY templates/ /app/templates/
 COPY report_viewer/ /app/report_viewer/
 
 # Create necessary directories
