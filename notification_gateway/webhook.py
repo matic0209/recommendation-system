@@ -255,6 +255,144 @@ def webhook(receiver_name):
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
+def format_sentry_message(payload):
+    """格式化 Sentry webhook 消息"""
+    action = payload.get('action', 'unknown')
+    data = payload.get('data', {})
+
+    # 获取 issue 或 event 信息
+    issue = data.get('issue')
+    event = data.get('event')
+
+    if not issue and not event:
+        return "Sentry 告警：未知事件"
+
+    # 提取关键信息
+    title = (issue or event).get('title', 'Unknown Error')
+    culprit = (issue or event).get('culprit', 'N/A')
+    level = (issue or event).get('level', 'error').upper()
+
+    # 环境和服务信息
+    tags = (event or {}).get('tags', [])
+    environment = next((t[1] for t in tags if t[0] == 'environment'), 'unknown')
+    server_name = next((t[1] for t in tags if t[0] == 'server_name'), 'N/A')
+
+    # Issue 统计信息
+    if issue:
+        count = issue.get('count', 0)
+        user_count = issue.get('userCount', 0)
+        first_seen = issue.get('firstSeen', '')
+        last_seen = issue.get('lastSeen', '')
+        permalink = issue.get('permalink', '')
+        status = issue.get('status', 'unresolved')
+    else:
+        count = 1
+        user_count = 0
+        first_seen = event.get('datetime', '')
+        last_seen = first_seen
+        permalink = event.get('web_url', '')
+        status = 'new'
+
+    # 格式化时间
+    try:
+        if first_seen:
+            dt = datetime.fromisoformat(first_seen.replace('Z', '+00:00'))
+            first_seen_str = dt.strftime('%Y-%m-%d %H:%M:%S')
+        else:
+            first_seen_str = 'N/A'
+    except:
+        first_seen_str = first_seen[:19] if first_seen else 'N/A'
+
+    # 选择图标
+    level_icon = {
+        'FATAL': '💀',
+        'ERROR': '🔥',
+        'WARNING': '⚠️',
+        'INFO': 'ℹ️',
+        'DEBUG': '🐛'
+    }.get(level, '📢')
+
+    action_icon = {
+        'created': '🆕',
+        'resolved': '✅',
+        'assigned': '👤',
+        'ignored': '🙈'
+    }.get(action.split('.')[-1], '📢')
+
+    status_text = {
+        'unresolved': '🔴 未解决',
+        'resolved': '✅ 已解决',
+        'ignored': '🙈 已忽略'
+    }.get(status, status)
+
+    # 构建消息
+    msg = f"""{action_icon} [Sentry 应用告警] {title}
+━━━━━━━━━━━━━━━━
+{level_icon} 级别: {level}
+🏷️  来源: Sentry
+📍 环境: {environment}"""
+
+    if server_name != 'N/A':
+        msg += f"\n🖥️  服务: {server_name}"
+
+    if culprit != 'N/A':
+        msg += f"\n📝 位置: {culprit}"
+
+    msg += f"\n⏰ 首次发现: {first_seen_str}"
+    msg += f"\n📊 状态: {status_text}"
+
+    if count > 1:
+        msg += f"\n🔢 发生次数: {count}"
+
+    if user_count > 0:
+        msg += f"\n👥 影响用户: {user_count}"
+
+    if permalink:
+        msg += f"\n\n🔗 详情: {permalink}"
+
+    msg += "\n━━━━━━━━━━━━━━━━"
+
+    return msg
+
+
+@app.route('/webhook/sentry', methods=['POST'])
+def sentry_webhook():
+    """接收 Sentry webhook"""
+    try:
+        data = request.get_json()
+        logger.info(f"收到 Sentry 告警: {json.dumps(data, ensure_ascii=False)}")
+
+        # 格式化消息
+        message = format_sentry_message(data)
+
+        # 发送到企业微信
+        user_id = DEFAULT_USER
+        success = send_weixin_message(user_id, message)
+
+        if success:
+            return jsonify({'status': 'success'}), 200
+        else:
+            return jsonify({'status': 'error', 'message': 'failed to send message'}), 500
+
+    except Exception as e:
+        logger.error(f"处理 Sentry webhook 异常: {e}", exc_info=True)
+
+        # Sentry: 记录处理失败
+        if sentry_enabled:
+            try:
+                from app.sentry_config import capture_exception_with_context
+                capture_exception_with_context(
+                    e,
+                    level="error",
+                    fingerprint=["notification", "sentry_webhook_failed"],
+                    webhook_source="sentry",
+                )
+            except ImportError:
+                pass
+
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
 @app.route('/health', methods=['GET'])
 def health():
     """健康检查"""
