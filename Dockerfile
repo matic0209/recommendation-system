@@ -41,7 +41,7 @@ COPY data/ /app/data/
 COPY models/ /app/models/
 
 # Create necessary directories
-RUN mkdir -p /app/logs /app/data /app/models && \
+RUN mkdir -p /app/logs /app/data /app/models /app/data/evaluation && \
     chown -R appuser:appuser /app
 
 # Switch to non-root user
