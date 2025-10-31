@@ -18,7 +18,7 @@ with DAG(
         bash_command=(
             "cd /opt/recommend && "
             "MATOMO_DB_HOST={{ var.value.get('MATOMO_DB_HOST', 'matomo') }} "
-            "/opt/venv/bin/python -m pipeline.daily_report --date {{ ds }}"
+            "python -m pipeline.daily_report --date {{ ds }}"
         ),
     )
 
