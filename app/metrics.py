@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 import time
+from collections import defaultdict
 from functools import wraps
-from typing import Any, Callable
+from typing import Any, Callable, Dict
 
 from prometheus_client import Counter, Gauge, Histogram, Info
 
@@ -135,6 +136,19 @@ error_total = Counter(
     ["error_type", "endpoint"],
 )
 
+# Exposure / fallback metrics
+recommendation_exposures_total = Counter(
+    "recommendation_exposures_total",
+    "Number of recommendation items exposed",
+    ["endpoint", "variant", "experiment_variant", "degrade_reason"],
+)
+
+fallback_ratio_gauge = Gauge(
+    "recommendation_fallback_ratio",
+    "Ratio of fallback items served per endpoint (rolling)",
+    ["endpoint"],
+)
+
 
 class MetricsTracker:
     """Track metrics for monitoring."""
@@ -143,6 +157,8 @@ class MetricsTracker:
         """Initialize metrics tracker."""
         self.cache_hits = 0
         self.cache_misses = 0
+        self.exposure_totals: Dict[str, int] = defaultdict(int)
+        self.fallback_totals: Dict[str, int] = defaultdict(int)
 
     def track_cache_hit(self) -> None:
         """Track cache hit."""
@@ -170,6 +186,18 @@ class MetricsTracker:
     def track_error(self, error_type: str, endpoint: str) -> None:
         """Track error occurrence."""
         error_total.labels(error_type=error_type, endpoint=endpoint).inc()
+
+    def track_exposure(self, endpoint: str, degrade_reason: str, count: int) -> None:
+        """Track exposure counts and update fallback ratio gauge."""
+        if count <= 0:
+            return
+        self.exposure_totals[endpoint] += count
+        if degrade_reason and degrade_reason != "none":
+            self.fallback_totals[endpoint] += count
+        total = self.exposure_totals[endpoint]
+        if total > 0:
+            ratio = self.fallback_totals[endpoint] / total
+            fallback_ratio_gauge.labels(endpoint=endpoint).set(ratio)
 
 
 # Global metrics tracker

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -43,6 +44,7 @@ from app.metrics import (
     recommendation_count,
     recommendation_latency_seconds,
     recommendation_requests_total,
+    recommendation_exposures_total,
     service_info,
     track_request_metrics,
     recommendation_degraded_total,
@@ -534,6 +536,30 @@ def _load_dataset_metadata(
         return {}, {}, pd.DataFrame()
 
     return _parse_dataset_metadata_frame(frame, source=source_label)
+
+
+def _load_feature_versions() -> Dict[str, str]:
+    frame = _read_feature_store("SELECT view_name, refreshed_at FROM feature_metadata")
+    if frame.empty:
+        return {}
+    frame = frame.copy()
+    frame["view_name"] = frame["view_name"].astype(str)
+    frame["refreshed_at"] = frame["refreshed_at"].fillna("").astype(str)
+    versions: Dict[str, str] = {}
+    for row in frame.to_dict(orient="records"):
+        view_name = row.get("view_name")
+        refreshed_at = row.get("refreshed_at")
+        if view_name:
+            versions[view_name] = refreshed_at or ""
+    return versions
+
+
+def _compute_feature_snapshot_id(versions: Dict[str, str]) -> Optional[str]:
+    if not versions:
+        return None
+    parts = [f"{name}:{versions[name]}" for name in sorted(versions)]
+    digest = hashlib.sha1("|".join(parts).encode("utf-8")).hexdigest()
+    return digest
 
 
 def _load_user_history() -> Dict[int, List[Dict[str, float]]]:
@@ -1075,6 +1101,37 @@ def _log_exposure(
         context["degrade_reason"] = degrade_reason
     if experiment_variant:
         context["experiment_variant"] = experiment_variant
+    try:
+        state = _get_app_state()
+    except RuntimeError:
+        state = None
+    if state:
+        model_run_id = getattr(state, "model_run_id", None)
+        if model_run_id and "model_run_id" not in context:
+            context["model_run_id"] = model_run_id
+        feature_snapshot_id = getattr(state, "feature_snapshot_id", None)
+        if feature_snapshot_id:
+            context["feature_snapshot_id"] = feature_snapshot_id
+        feature_versions = getattr(state, "feature_versions", None)
+        if feature_versions:
+            context["feature_versions"] = feature_versions
+
+    endpoint_label = context.get("endpoint", event)
+    variant_label = context.get("variant", "primary") or "primary"
+    experiment_label = context.get("experiment_variant", "control") or "control"
+    degrade_label = context.get("degrade_reason", "none") or "none"
+    exposure_count = len(exposure_items)
+
+    recommendation_exposures_total.labels(
+        endpoint=endpoint_label,
+        variant=variant_label,
+        experiment_variant=experiment_label,
+        degrade_reason=degrade_label,
+    ).inc(exposure_count)
+
+    metrics_tracker = get_metrics_tracker()
+    metrics_tracker.track_exposure(endpoint_label, degrade_label, exposure_count)
+
     record_exposure(
         request_id=request_id,
         user_id=user_id,
@@ -1133,6 +1190,8 @@ def load_models() -> None:
         feature_store=feature_store,
         dataset_ids=dataset_ids,
     )
+    feature_versions = _load_feature_versions()
+    feature_snapshot_id = _compute_feature_snapshot_id(feature_versions)
     user_history = _load_user_history()
     user_profiles = _load_user_profile()
     user_tag_preferences = _build_user_tag_preferences(user_history, dataset_tags)
@@ -1148,6 +1207,8 @@ def load_models() -> None:
     app.state.user_profiles = user_profiles
     app.state.user_tag_preferences = user_tag_preferences
     app.state.personalization_history_limit = 20
+    app.state.feature_versions = feature_versions
+    app.state.feature_snapshot_id = feature_snapshot_id
     app.state.models_loaded = True
 
     app.state.recall_indices = _load_recall_artifacts(MODELS_DIR)
