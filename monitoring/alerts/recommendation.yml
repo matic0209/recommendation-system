@@ -35,6 +35,26 @@ groups:
           summary: "降级次数异常"
           description: "过去 5 分钟降级次数 >1/s，请查 Redis 或召回模型状态。"
 
+      - alert: RecommendationFallbackRatioHigh
+        expr: |
+          max by (endpoint) (recommendation_fallback_ratio) > 0.2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Fallback 比例超过 20%"
+          description: "端点 {{ $labels.endpoint }} 的 fallback 比例已达 {{ $value | humanizePercentage }}，请检查模型或缓存。"
+
+      - alert: RecommendationExposureDrop
+        expr: |
+          sum(rate(recommendation_exposures_total[5m])) == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "曝光量为 0"
+          description: "过去 5 分钟曝光量为 0，可能是推荐接口或埋点异常。"
+
       - alert: DataQualityScoreDrop
         expr: |
           min(data_quality_score{table=~"interactions|dataset_features|user_profile"}) < 80

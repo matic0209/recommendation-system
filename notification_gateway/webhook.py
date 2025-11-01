@@ -223,6 +223,33 @@ def webhook(receiver_name):
         # 格式化消息
         message = format_alert_message(alerts, receiver_name)
 
+        # Sentry: 记录 Prometheus 告警
+        if sentry_enabled:
+            for alert in alerts:
+                labels = alert.get("labels", {})
+                annotations = alert.get("annotations", {})
+                alertname = labels.get("alertname", "UnknownAlert")
+                severity = labels.get("severity", "info").lower()
+                level = {
+                    "critical": "error",
+                    "warning": "warning",
+                    "info": "info",
+                }.get(severity, "info")
+                capture_message_with_context(
+                    f"[Prometheus] {alertname} ({severity})",
+                    level=level,
+                    receiver=receiver_name,
+                    alertname=alertname,
+                    severity=severity,
+                    instance=labels.get("instance"),
+                    endpoint=labels.get("endpoint"),
+                    table=labels.get("table"),
+                    summary=annotations.get("summary"),
+                    description=annotations.get("description"),
+                    starts_at=alert.get("startsAt"),
+                    ends_at=alert.get("endsAt"),
+                )
+
         # 发送到企业微信
         user_id = DEFAULT_USER
         success = send_weixin_message(user_id, message)
