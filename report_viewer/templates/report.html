@@ -56,6 +56,7 @@
 
       {% if report %}
       {% set summary = report.summary %}
+      {% set operations = report.operations %}
       {% set delta_prev = report.deltas.vs_previous_day %}
       {% set delta_avg = report.deltas.vs_7day_avg %}
 
@@ -126,6 +127,24 @@
         <h2 class="h6">Trend (Last 7 Days)</h2>
         <canvas id="trendChart" height="120"></canvas>
       </section>
+
+      {% if operations %}
+      <section class="mt-4">
+        <div class="row g-3">
+          <div class="col-lg-3 col-md-6">
+            <div class="card metric-card shadow-sm">
+              <div class="card-body">
+                <h6 class="card-subtitle text-muted">Fallback Exposures</h6>
+                <h3 class="card-title">{{ operations.fallback_exposures | int }}</h3>
+                <p class="mb-0 text-muted">
+                  {{ (operations.fallback_ratio or 0) * 100 | round(2) }}% of total exposures
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+      {% endif %}
 
       <section class="mt-5">
         <h2 class="h6">Breakdowns</h2>
@@ -228,6 +247,116 @@
           </div>
         </div>
       </section>
+
+      {% if operations %}
+      <section class="mt-5">
+        <h2 class="h6">Fallback Details</h2>
+        <div class="card shadow-sm">
+          <div class="card-body p-0">
+            <div class="table-responsive">
+              <table class="table table-striped table-hover mb-0">
+                <thead>
+                  <tr>
+                    <th>Reason</th>
+                    <th>Exposures</th>
+                    <th>Clicks</th>
+                    <th>Conversions</th>
+                    <th>CTR</th>
+                    <th>CVR</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {% for row in operations.fallback_breakdown %}
+                    <tr>
+                      <td>{{ row.degrade_reason or "unknown" }}</td>
+                      <td>{{ row.exposures | int }}</td>
+                      <td>{{ row.clicks | int }}</td>
+                      <td>{{ row.conversions | int }}</td>
+                      <td>{{ (row.ctr or 0) * 100 | round(2) }}%</td>
+                      <td>{{ (row.cvr or 0) * 100 | round(2) }}%</td>
+                    </tr>
+                  {% else %}
+                    <tr><td colspan="6" class="text-center text-muted py-3">No fallback events</td></tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="mt-5">
+        <h2 class="h6">Variant Distribution</h2>
+        <div class="card shadow-sm">
+          <div class="card-body p-0">
+            <div class="table-responsive">
+              <table class="table table-striped table-hover mb-0">
+                <thead>
+                  <tr>
+                    <th>Variant</th>
+                    <th>Exposures</th>
+                    <th>Clicks</th>
+                    <th>Conversions</th>
+                    <th>CTR</th>
+                    <th>CVR</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {% for row in operations.variant_breakdown %}
+                    <tr>
+                      <td>{{ row.variant or "default" }}</td>
+                      <td>{{ row.exposures | int }}</td>
+                      <td>{{ row.clicks | int }}</td>
+                      <td>{{ row.conversions | int }}</td>
+                      <td>{{ (row.ctr or 0) * 100 | round(2) }}%</td>
+                      <td>{{ (row.cvr or 0) * 100 | round(2) }}%</td>
+                    </tr>
+                  {% else %}
+                    <tr><td colspan="6" class="text-center text-muted py-3">No data</td></tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="mt-5">
+        <h2 class="h6">Experiment Variant</h2>
+        <div class="card shadow-sm">
+          <div class="card-body p-0">
+            <div class="table-responsive">
+              <table class="table table-striped table-hover mb-0">
+                <thead>
+                  <tr>
+                    <th>Experiment Variant</th>
+                    <th>Exposures</th>
+                    <th>Clicks</th>
+                    <th>Conversions</th>
+                    <th>CTR</th>
+                    <th>CVR</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {% for row in operations.experiment_breakdown %}
+                    <tr>
+                      <td>{{ row.experiment_variant or "control" }}</td>
+                      <td>{{ row.exposures | int }}</td>
+                      <td>{{ row.clicks | int }}</td>
+                      <td>{{ row.conversions | int }}</td>
+                      <td>{{ (row.ctr or 0) * 100 | round(2) }}%</td>
+                      <td>{{ (row.cvr or 0) * 100 | round(2) }}%</td>
+                    </tr>
+                  {% else %}
+                    <tr><td colspan="6" class="text-center text-muted py-3">No experiment data</td></tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </section>
+      {% endif %}
 
       <section class="mt-5">
         <h2 class="h6">Top Datasets (by clicks)</h2>

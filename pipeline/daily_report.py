@@ -213,6 +213,45 @@ def _aggregate_breakdowns(merged: pd.DataFrame) -> Dict[str, List[Dict[str, Any]
     }
 
 
+def _aggregate_operations(merged: pd.DataFrame, summary: Dict[str, Any]) -> Dict[str, Any]:
+    total_exposures = summary.get("total_exposures") or 0
+
+    fallback_df = merged[merged["degrade_reason"].notna()].copy() if not merged.empty else pd.DataFrame()
+    fallback_exposures = int(fallback_df["exposure_count"].sum()) if not fallback_df.empty else 0
+    fallback_ratio = fallback_exposures / total_exposures if total_exposures else 0.0
+
+    def _format_breakdown(df: pd.DataFrame, group_cols: List[str]) -> List[Dict[str, Any]]:
+        if df.empty:
+            return []
+        grouped = df.groupby(group_cols, dropna=False).agg(
+            exposures=("exposure_count", "sum"),
+            clicks=("click_count", "sum"),
+            conversions=("conversion_count", "sum"),
+            revenue=("total_revenue", "sum"),
+        ).reset_index()
+        grouped["ctr"] = grouped.apply(
+            lambda row: row["clicks"] / row["exposures"] if row["exposures"] > 0 else 0.0,
+            axis=1,
+        )
+        grouped["cvr"] = grouped.apply(
+            lambda row: row["conversions"] / row["exposures"] if row["exposures"] > 0 else 0.0,
+            axis=1,
+        )
+        return grouped.to_dict("records")
+
+    fallback_breakdown = _format_breakdown(fallback_df, ["degrade_reason"])
+    variant_breakdown = _format_breakdown(merged, ["variant"]) if not merged.empty else []
+    experiment_breakdown = _format_breakdown(merged, ["experiment_variant"]) if not merged.empty else []
+
+    return {
+        "fallback_exposures": fallback_exposures,
+        "fallback_ratio": fallback_ratio,
+        "fallback_breakdown": fallback_breakdown,
+        "variant_breakdown": variant_breakdown,
+        "experiment_breakdown": experiment_breakdown,
+    }
+
+
 def generate_daily_report(target_day: date) -> Dict[str, Any]:
     LOGGER.info("Generating recommendation report for %s", target_day.isoformat())
 
@@ -233,6 +272,7 @@ def generate_daily_report(target_day: date) -> Dict[str, Any]:
 
     merged = _build_merged_dataset(exposures, clicks, conversions)
     breakdowns = _aggregate_breakdowns(merged)
+    operations = _aggregate_operations(merged, summary)
 
     history = _load_history(target_day, days=7)
     prev_summary = history[-1].summary if history else None
@@ -284,6 +324,7 @@ def generate_daily_report(target_day: date) -> Dict[str, Any]:
             "seven_day_average": avg_values,
         },
         "breakdowns": breakdowns,
+        "operations": operations,
         "history_chart": chart_data,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "record_counts": {
