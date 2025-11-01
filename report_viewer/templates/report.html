@@ -76,7 +76,7 @@
             <div class="card metric-card shadow-sm">
               <div class="card-body">
                 <h6 class="card-subtitle text-muted">Total Exposures</h6>
-                <h3 class="card-title">{{ summary.total_exposures | default(0) | int }}</h3>
+                <h3 class="card-title">{{ summary.total_exposures | default(0, true) | int }}</h3>
                 <div class="d-flex gap-3">
                   <div>vs Day: {{ delta_badge(delta_prev.total_exposures) }}</div>
                   <div>vs 7d: {{ delta_badge(delta_avg.total_exposures) }}</div>
@@ -88,7 +88,7 @@
             <div class="card metric-card shadow-sm">
               <div class="card-body">
                 <h6 class="card-subtitle text-muted">Total Clicks</h6>
-                <h3 class="card-title">{{ summary.total_clicks | default(0) | int }}</h3>
+                <h3 class="card-title">{{ summary.total_clicks | default(0, true) | int }}</h3>
                 <div class="d-flex gap-3">
                   <div>vs Day: {{ delta_badge(delta_prev.total_clicks) }}</div>
                   <div>vs 7d: {{ delta_badge(delta_avg.total_clicks) }}</div>
@@ -100,7 +100,7 @@
             <div class="card metric-card shadow-sm">
               <div class="card-body">
                 <h6 class="card-subtitle text-muted">Detail Views</h6>
-                <h3 class="card-title">{{ summary.total_detail_views | default(0) | int }}</h3>
+                <h3 class="card-title">{{ summary.total_detail_views | default(0, true) | int }}</h3>
               </div>
             </div>
           </div>
@@ -108,7 +108,7 @@
             <div class="card metric-card shadow-sm">
               <div class="card-body">
                 <h6 class="card-subtitle text-muted">Conversions</h6>
-                <h3 class="card-title">{{ summary.total_conversions | default(0) | int }}</h3>
+                <h3 class="card-title">{{ summary.total_conversions | default(0, true) | int }}</h3>
               </div>
             </div>
           </div>
@@ -118,7 +118,7 @@
             <div class="card metric-card shadow-sm">
               <div class="card-body">
                 <h6 class="card-subtitle text-muted">CTR</h6>
-                <h3 class="card-title">{{ (summary.overall_ctr or 0) * 100 | round(2) }}%</h3>
+                <h3 class="card-title">{{ ((summary.overall_ctr | default(0, true)) | float * 100) | round(2) }}%</h3>
                 <div class="d-flex gap-3">
                   <div>vs Day: {{ delta_badge(delta_prev.overall_ctr) }}</div>
                   <div>vs 7d: {{ delta_badge(delta_avg.overall_ctr) }}</div>
@@ -130,7 +130,7 @@
             <div class="card metric-card shadow-sm">
               <div class="card-body">
                 <h6 class="card-subtitle text-muted">Click → Detail</h6>
-                <h3 class="card-title">{{ (summary.overall_detail_rate or 0) * 100 | round(2) }}%</h3>
+                <h3 class="card-title">{{ ((summary.overall_detail_rate | default(0, true)) | float * 100) | round(2) }}%</h3>
               </div>
             </div>
           </div>
@@ -138,7 +138,7 @@
             <div class="card metric-card shadow-sm">
               <div class="card-body">
                 <h6 class="card-subtitle text-muted">Detail → Conversion</h6>
-                <h3 class="card-title">{{ (summary.overall_detail_to_conversion_rate or 0) * 100 | round(2) }}%</h3>
+                <h3 class="card-title">{{ ((summary.overall_detail_to_conversion_rate | default(0, true)) | float * 100) | round(2) }}%</h3>
               </div>
             </div>
           </div>
@@ -146,7 +146,7 @@
             <div class="card metric-card shadow-sm">
               <div class="card-body">
                 <h6 class="card-subtitle text-muted">Revenue</h6>
-                <h3 class="card-title">￥{{ summary.total_revenue | round(2) }}</h3>
+                <h3 class="card-title">￥{{ ((summary.total_revenue | default(0, true)) | float) | round(2) }}</h3>
               </div>
             </div>
           </div>
