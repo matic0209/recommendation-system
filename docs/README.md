@@ -1,129 +1,88 @@
-# 推荐系统项目说明
+# Recommendation Platform – Documentation
 
-## 1. 项目概述
+This document收敛了推荐系统的现状、核心组件以及如何部署/运维。
 
-本仓库实现了面向数据集详情页的推荐服务，结合离线训练与在线服务两部分：
+## 1. 系统概览
 
-- **离线训练**  
-  通过 Airflow 调度的 `recommendation_pipeline` DAG，完成数据抽取 → 特征工程 → 模型训练 → 指标评估 → 指标对账。  
-  支持从业务 JSON 导出或数据库（Business / Matomo）读取增量，自动维护水位。
+| 模块 | 说明 | 关键路径 |
+| --- | --- | --- |
+| 推荐 API | FastAPI 服务，提供 `/recommend/detail/{dataset_id}`、`/similar/{dataset_id}` 等实时推荐接口 | `app/main.py` |
+| 离线流水线 | 数据抽取、特征构建、模型训练与评估脚本 | `pipeline/` |
+| 监控链路 | Prometheus + Alertmanager + Notification Gateway + Sentry | `monitoring/`, `notification_gateway/` |
+| 日报体系 | `pipeline.daily_report` 输出 JSON，`report_viewer` 动态渲染漏斗看板 | `pipeline/daily_report.py`, `report_viewer/` |
 
-- **在线服务**  
-  `recommendation-api` 基于 FastAPI，提供 `/health`、`/similar/{dataset_id}`、`/recommend/detail/{dataset_id}` 等接口。  
-  模型文件通过 Docker 挂载在宿主机，可在离线环境更新。
+## 2. 快速部署
 
-- **监控与运维**  
-  Prometheus + Grafana 监控关键指标；Alertmanager 经 `notification-gateway` 转发企业微信告警；MLflow 记录训练产物；Airflow 管理 DAG。
-
-## 2. 仓库结构
-
-```
-├── app/                     # 在线服务代码
-├── pipeline/                # 离线数据、特征、模型、评估脚本
-├── data/                    # 数据目录（由任务生成）
-├── models/                  # 模型文件（离线产出 → 在线引用）
-├── docs/                    # 文档
-├── monitoring/              # Prometheus / Grafana / Alertmanager 配置
-├── docker-compose.yml       # 组件编排
-├── Dockerfile*              # recommendation-api / Airflow 镜像构建
-└── scripts/                 # 常用脚本
+```bash
+git clone https://github.com/matic0209/recommendation-system.git
+cd recommendation-system
+cp .env.example .env   # 按需调整 Redis/Sentry/端口
+docker compose up -d --build
 ```
 
-## 3. 数据与模型流程
+- 推荐 API 默认监听 `8090`（`RECOMMEND_API_HOST_PORT`）。
+- 日报 viewer 默认映射端口 `8800`（`REPORT_VIEWER_HOST_PORT`）。
+- Prometheus / Alertmanager / Grafana 端口参见 `.env`。
 
-1. **数据抽取 (`pipeline.extract_load`)**  
-   - `DATA_SOURCE=json` 时读取 `DATA_JSON_DIR` 中的全量/增量 JSON；  
-   - `DATA_SOURCE=database` 时直连 Business / Matomo 数据库；  
-   - 水位记录在 `data/_metadata/extract_state.json`。
+## 3. 数据 & 模型
 
-2. **特征 & 清洗 (`pipeline.build_features`)**  
-   生成 `data/processed/*` 和 `_v2` 视图。图片特征使用本地缓存的 CLIP 模型（`SENTENCE_TRANSFORMERS_HOME`）。
-
-3. **模型训练 (`pipeline.train_models`)**  
-   输出召回模型、排序模型及 MLflow 记录。模型文件默认存放 `models/`。
-
-4. **评估 (`pipeline.evaluate`)**  
-   结合曝光日志（`data/evaluation/exposure_log.jsonl`）与 Matomo 行为，生成 `summary.json`、`exposure_metrics.json` 等评估文件。
-
-5. **指标对账 (`pipeline.reconcile_metrics`)**  
-   聚合推荐曝光、点击、转化与业务指标，用于监控闭环。
-
-## 4. 运行组件
-
-- **Airflow**：调度 DAG，`recommendation_pipeline` 为主流程。  
-- **MLflow**：记录模型参数、指标、产物，挂载 `mlflow-data` 目录。  
-- **Redis**：在线服务的缓存与实验位存储。  
-- **Prometheus / Grafana / Alertmanager**：监控与告警。  
-- **notification-gateway**：企业微信告警中转。  
-- **Matomo**：推荐效果来源数据（点击 / 转化等）。
-
-## 5. 快速上手
-
-1. 创建 Python 虚拟环境并安装依赖：
+1. **ETL**：`python -m pipeline.extract_load` 支持业务库（JSON/MySQL）与 Matomo 数据。
+2. **特征构建**：`python -m pipeline.build_features_v2` 生成增强特征并同步到 SQLite/Redis。
+3. **训练与评估**：
    ```bash
-   python3 -m venv venv
-   source venv/bin/activate
-   pip install -r requirements.txt
+   python -m pipeline.train_models
+   python -m pipeline.evaluate_v2
    ```
-2. 准备 `.env` 或 `.env.prod`：
-   ```ini
-   DATA_SOURCE=json
-   DATA_JSON_DIR=/path/to/json
-   BUSINESS_DATA_SOURCE=json
-   MATOMO_DATA_SOURCE=database
-   MATOMO_DB_HOST=…
-   CLIP_MODEL_PATH=/opt/recommend/cache/sentence-transformers/clip-ViT-B-32
-   ```
-3. 首次全量训练：
-   ```bash
-   bash scripts/run_pipeline.sh --full-refresh
-   ```
-4. 启动 Docker 组件（详见《DOCKER 部署指南》）：
-   ```bash
-   docker compose up -d
-   ```
-5. 验证：
-   ```bash
-   ./smoke_test.sh
-   ```
+4. **模型热更新**：推荐 API 启动时自动加载最新模型，可通过 `/models/reload` 刷新。
 
-## 6. 日常运维要点
+## 4. 监控体系
 
-- **Airflow**  
-  `docker compose exec airflow-webserver airflow dags list-runs -d recommendation_pipeline`  
-  单独重跑任务：`airflow tasks run … <execution_date> --ignore-all-dependencies`
+| 采集项 | 描述 | Prometheus 指标 |
+| --- | --- | --- |
+| 请求量、时延 | `recommendation_requests_total`, `recommendation_latency_seconds` |
+| 曝光 & 漏斗 | `recommendation_exposures_total`, `recommendation_fallback_ratio` |
+| Fallback 统计 | `fallback_triggered_total`, `recommendation_degraded_total` |
+| 错误告警 | `error_total` (FastAPI)、Alertmanager 规则 |
 
-- **模型权限**  
-  `models/`、`data/`、`mlflow-data`、CLIP 缓存目录需赋予 UID 50000 可写权限：
-  ```bash
-  sudo chown -R 50000:50000 models data /var/lib/docker/volumes/recommend_mlflow-data/_data /opt/recommend/cache
-  ```
+Alertmanager 告警（延迟、曝光断流、fallback 比例等）通过 Notification Gateway 推送企业微信并写入 Sentry。
 
-- **监控**  
-  - Grafana：`http://<host>:3000`  
-  - Prometheus：`http://<host>:9090`  
-  - MLflow：`http://<host>:5000`  
-  - Alertmanager：`http://<host>:9093`
+## 5. 每日报告 & Viewer
 
-- **日志路径**  
-  - 推荐服务：`logs/`  
-  - Airflow：`airflow/logs/`  
-  - 曝光日志：`data/evaluation/exposure_log.jsonl`
+Airflow DAG `daily_recommendation_report` 每日 06:00 UTC 运行：
+```bash
+python -m pipeline.daily_report --date {{ ds }}
+```
+输出 JSON 到 `data/evaluation/daily_reports/`。  
+FastAPI viewer（`report_viewer/app.py`）根据 JSON 即时渲染漏斗看板，包含：
 
-- **常见问题**  
-  - CLIP 模型：确保 `CLIP_MODEL_PATH` 指向宿主机缓存，设置 `HF_HUB_OFFLINE=1`；  
-  - JSON 路径：Airflow 容器需挂载 `DATA_JSON_DIR`；  
-  - 权限：`Permission denied` 多半是挂载目录未 `chown` 到 `appuser`。
+- 曝光 → 点击 → 明细页 → 下单漏斗及转化率
+- Fallback/Variant/实验组拆解
+- Top 数据集表现
 
-## 7. API 快速参考
+详细交互见 `docs/daily_report.md`。
 
-| 接口                            | 说明                     | 示例                                       |
-|---------------------------------|--------------------------|--------------------------------------------|
-| `GET /health`                   | 健康检查                 | 返回模型加载与缓存状态                     |
-| `GET /similar/{dataset_id}`     | 相似推荐                 | `/similar/123?top_n=10`                    |
-| `GET /recommend/detail/{id}`    | 详情页推荐               | `/recommend/detail/123?user_id=7&top_n=5`  |
-| `GET /metrics`                  | Prometheus 指标          | 用于监控抓取                               |
+## 6. 重要脚本
 
-更多细节参见后续文档：《DOCKER 部署指南》《运维手册》《常见问题与排错》。确保先阅读部署指南，再逐步进行上线与验证。  
+| 脚本 | 用途 |
+| --- | --- |
+| `pipeline/daily_report.py` | 生成每日推荐日报 |
+| `report_viewer/app.py` | 报表查看服务 |
+| `notification_gateway/webhook.py` | 接收 Prometheus/Sentry Webhook，推送企业微信 & 写入 Sentry |
+| `app/metrics.py` | Prometheus 指标定义 |
 
-如需英文文档，可根据本说明自行翻译或补充。欢迎在生产环境实践后将经验回写文档。祝使用顺利！
+## 7. 开发常用命令
+
+```bash
+venv/bin/python -m pipeline.extract_load --full-refresh
+venv/bin/python -m pipeline.train_models
+venv/bin/python -m pipeline.daily_report --date 2025-10-31
+uvicorn app.main:app --reload --port 8000
+```
+
+## 8. 版本说明
+
+详见 `docs/release_notes.md`，当前版本重点：
+
+- JSON 日报 + Viewer 漏斗展示
+- Prometheus 曝光 / Fallback 实时指标
+- Alertmanager → Notification Gateway → Sentry 联动
