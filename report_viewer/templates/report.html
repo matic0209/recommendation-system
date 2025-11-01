@@ -303,11 +303,11 @@
                       <td>{{ row.degrade_reason or "unknown" }}</td>
                       <td>{{ row.exposures | int }}</td>
                       <td>{{ row.clicks | int }}</td>
-                      <td>{{ row.detail_views | int }}</td>
-                      <td>{{ row.conversions | int }}</td>
-                      <td>{{ (row.ctr or 0) * 100 | round(2) }}%</td>
-                      <td>{{ (row.detail_rate or 0) * 100 | round(2) }}%</td>
-                      <td>{{ (row.cvr or 0) * 100 | round(2) }}%</td>
+                      <td>{{ (row.detail_views if row.detail_views is defined else 0) | int }}</td>
+                      <td>{{ row.conversions | default(0, true) | int }}</td>
+                      <td>{{ ((row.ctr if row.ctr is defined else 0) * 100) | round(2) }}%</td>
+                      <td>{{ ((row.detail_rate if row.detail_rate is defined else 0) * 100) | round(2) }}%</td>
+                      <td>{{ ((row.cvr if row.cvr is defined else 0) * 100) | round(2) }}%</td>
                     </tr>
                   {% else %}
                     <tr><td colspan="6" class="text-center text-muted py-3">No fallback events</td></tr>
@@ -343,11 +343,11 @@
                       <td>{{ row.variant or "default" }}</td>
                       <td>{{ row.exposures | int }}</td>
                       <td>{{ row.clicks | int }}</td>
-                      <td>{{ row.detail_views | int }}</td>
-                      <td>{{ row.conversions | int }}</td>
-                      <td>{{ (row.ctr or 0) * 100 | round(2) }}%</td>
-                      <td>{{ (row.detail_rate or 0) * 100 | round(2) }}%</td>
-                      <td>{{ (row.cvr or 0) * 100 | round(2) }}%</td>
+                      <td>{{ (row.detail_views if row.detail_views is defined else 0) | int }}</td>
+                      <td>{{ row.conversions | default(0, true) | int }}</td>
+                      <td>{{ ((row.ctr if row.ctr is defined else 0) * 100) | round(2) }}%</td>
+                      <td>{{ ((row.detail_rate if row.detail_rate is defined else 0) * 100) | round(2) }}%</td>
+                      <td>{{ ((row.cvr if row.cvr is defined else 0) * 100) | round(2) }}%</td>
                     </tr>
                   {% else %}
                     <tr><td colspan="6" class="text-center text-muted py-3">No data</td></tr>
@@ -383,11 +383,11 @@
                       <td>{{ row.experiment_variant or "control" }}</td>
                       <td>{{ row.exposures | int }}</td>
                       <td>{{ row.clicks | int }}</td>
-                      <td>{{ row.detail_views | int }}</td>
-                      <td>{{ row.conversions | int }}</td>
-                      <td>{{ (row.ctr or 0) * 100 | round(2) }}%</td>
-                      <td>{{ (row.detail_rate or 0) * 100 | round(2) }}%</td>
-                      <td>{{ (row.cvr or 0) * 100 | round(2) }}%</td>
+                      <td>{{ (row.detail_views if row.detail_views is defined else 0) | int }}</td>
+                      <td>{{ row.conversions | default(0, true) | int }}</td>
+                      <td>{{ ((row.ctr if row.ctr is defined else 0) * 100) | round(2) }}%</td>
+                      <td>{{ ((row.detail_rate if row.detail_rate is defined else 0) * 100) | round(2) }}%</td>
+                      <td>{{ ((row.cvr if row.cvr is defined else 0) * 100) | round(2) }}%</td>
                     </tr>
                   {% else %}
                     <tr><td colspan="6" class="text-center text-muted py-3">No experiment data</td></tr>
@@ -424,11 +424,11 @@
                       <td>{{ row.dataset_id }}</td>
                       <td>{{ row.exposures | int }}</td>
                       <td>{{ row.clicks | int }}</td>
-                      <td>{{ row.detail_views | int }}</td>
-                      <td>{{ row.conversions | int }}</td>
-                      <td>{{ (row.ctr or 0) * 100 | round(2) }}%</td>
-                      <td>{{ (row.detail_rate or 0) * 100 | round(2) }}%</td>
-                      <td>{{ (row.cvr or 0) * 100 | round(2) }}%</td>
+                      <td>{{ (row.detail_views if row.detail_views is defined else 0) | int }}</td>
+                      <td>{{ row.conversions | default(0, true) | int }}</td>
+                      <td>{{ ((row.ctr if row.ctr is defined else 0) * 100) | round(2) }}%</td>
+                      <td>{{ ((row.detail_rate if row.detail_rate is defined else 0) * 100) | round(2) }}%</td>
+                      <td>{{ ((row.cvr if row.cvr is defined else 0) * 100) | round(2) }}%</td>
                     </tr>
                   {% else %}
                     <tr><td colspan="6" class="text-center text-muted py-3">No data</td></tr>
