@@ -13,6 +13,7 @@ import pandas as pd
 from config.settings import DATA_DIR
 from pipeline.evaluate_v2 import (
     _compute_request_id_metrics,
+    _extract_dataset_from_row,
     _load_actions,
     _load_exposure_log,
     _load_recommend_clicks,
@@ -43,6 +44,7 @@ def _build_merged_dataset(
     exposures: pd.DataFrame,
     clicks: pd.DataFrame,
     conversions: pd.DataFrame,
+    detail_views: pd.DataFrame,
 ) -> pd.DataFrame:
     if exposures.empty:
         return pd.DataFrame(columns=[
@@ -63,6 +65,7 @@ def _build_merged_dataset(
             "click_time",
             "conversion_count",
             "total_revenue",
+            "detail_views",
         ])
 
     exp_cols = [
@@ -123,7 +126,45 @@ def _build_merged_dataset(
     )
     merged["conversion_count"] = merged.get("conversion_count", 0).fillna(0).astype(int)
     merged["total_revenue"] = merged.get("total_revenue", 0.0).fillna(0.0)
+
+    if detail_views.empty:
+        detail_group = pd.DataFrame(columns=["dataset_id", "detail_views"])
+    else:
+        detail_views = detail_views.copy()
+        detail_views["server_time"] = pd.to_datetime(detail_views["server_time"], errors="coerce")
+        detail_group = detail_views.groupby("dataset_id", dropna=False).agg(
+            detail_views=("dataset_id", "count"),
+        ).reset_index()
+
+    merged = merged.merge(detail_group, on="dataset_id", how="left")
+    merged["detail_views"] = merged.get("detail_views", 0).fillna(0).astype(int)
     return merged
+
+
+def _load_detail_views(mapping: Dict[int, int]) -> pd.DataFrame:
+    path = DATA_DIR / "matomo" / "matomo_log_link_visit_action.parquet"
+    if not path.exists():
+        return pd.DataFrame(columns=["dataset_id", "server_time"])
+
+    actions = pd.read_parquet(path)
+    records: List[Dict[str, Any]] = []
+    for _, row in actions.iterrows():
+        dataset_id = _extract_dataset_from_row(row, mapping)
+        if dataset_id is None:
+            continue
+
+        server_time = pd.to_datetime(row.get("server_time"), errors="coerce")
+        if pd.isna(server_time):
+            continue
+
+        records.append({
+            "dataset_id": int(dataset_id),
+            "server_time": server_time,
+        })
+
+    if not records:
+        return pd.DataFrame(columns=["dataset_id", "server_time"])
+    return pd.DataFrame.from_records(records)
 
 
 def _load_history(target_day: date, days: int = 7) -> List[HistoryPoint]:
@@ -168,11 +209,16 @@ def _aggregate_breakdowns(merged: pd.DataFrame) -> Dict[str, List[Dict[str, Any]
         grouped = df.groupby(group_cols, dropna=False).agg(
             exposures=("exposure_count", "sum"),
             clicks=("click_count", "sum"),
+            detail_views=("detail_views", "sum"),
             conversions=("conversion_count", "sum"),
             revenue=("total_revenue", "sum"),
         ).reset_index()
         grouped["ctr"] = grouped.apply(
             lambda row: row["clicks"] / row["exposures"] if row["exposures"] > 0 else 0.0,
+            axis=1,
+        )
+        grouped["detail_rate"] = grouped.apply(
+            lambda row: row["detail_views"] / row["clicks"] if row["clicks"] > 0 else 0.0,
             axis=1,
         )
         grouped["cvr"] = grouped.apply(
@@ -188,11 +234,16 @@ def _aggregate_breakdowns(merged: pd.DataFrame) -> Dict[str, List[Dict[str, Any]
     dataset_group = merged.groupby("dataset_id", dropna=False).agg(
         exposures=("exposure_count", "sum"),
         clicks=("click_count", "sum"),
+        detail_views=("detail_views", "sum"),
         conversions=("conversion_count", "sum"),
         revenue=("total_revenue", "sum"),
     ).reset_index()
     dataset_group["ctr"] = dataset_group.apply(
         lambda row: row["clicks"] / row["exposures"] if row["exposures"] > 0 else 0.0,
+        axis=1,
+    )
+    dataset_group["detail_rate"] = dataset_group.apply(
+        lambda row: row["detail_views"] / row["clicks"] if row["clicks"] > 0 else 0.0,
         axis=1,
     )
     dataset_group["cvr"] = dataset_group.apply(
@@ -215,6 +266,9 @@ def _aggregate_breakdowns(merged: pd.DataFrame) -> Dict[str, List[Dict[str, Any]
 
 def _aggregate_operations(merged: pd.DataFrame, summary: Dict[str, Any]) -> Dict[str, Any]:
     total_exposures = summary.get("total_exposures") or 0
+    total_clicks = summary.get("total_clicks") or 0
+    total_detail = summary.get("total_detail_views") or 0
+    total_conversions = summary.get("total_conversions") or 0
 
     fallback_df = merged[merged["degrade_reason"].notna()].copy() if not merged.empty else pd.DataFrame()
     fallback_exposures = int(fallback_df["exposure_count"].sum()) if not fallback_df.empty else 0
@@ -249,6 +303,11 @@ def _aggregate_operations(merged: pd.DataFrame, summary: Dict[str, Any]) -> Dict
         "fallback_breakdown": fallback_breakdown,
         "variant_breakdown": variant_breakdown,
         "experiment_breakdown": experiment_breakdown,
+        "funnel_rates": {
+            "ctr": total_clicks / total_exposures if total_exposures else 0.0,
+            "click_to_detail": total_detail / total_clicks if total_clicks else 0.0,
+            "detail_to_conversion": total_conversions / total_detail if total_detail else 0.0,
+        },
     }
 
 
@@ -265,12 +324,27 @@ def generate_daily_report(target_day: date) -> Dict[str, Any]:
     conversions = _load_recommend_conversions(mapping)
     conversions = _filter_by_date(conversions, target_day, "server_time")
 
+    detail_views = _load_detail_views(mapping)
+    detail_views = _filter_by_date(detail_views, target_day, "server_time")
+
     metrics = _compute_request_id_metrics(exposures, clicks, conversions)
     summary = metrics.get("summary", {}) or {}
     summary["date"] = target_day.isoformat()
+    summary["total_exposures"] = int(summary.get("total_exposures", 0) or 0)
+    summary["total_clicks"] = int(summary.get("total_clicks", 0) or 0)
+    summary["total_conversions"] = int(summary.get("total_conversions", 0) or 0)
+    summary["total_revenue"] = float(summary.get("total_revenue", 0.0) or 0.0)
+    summary["total_detail_views"] = int(len(detail_views))
+    summary["overall_ctr"] = summary["total_clicks"] / summary["total_exposures"] if summary["total_exposures"] else 0.0
+    summary["overall_detail_rate"] = (
+        summary["total_detail_views"] / summary["total_clicks"] if summary["total_clicks"] else 0.0
+    )
+    summary["overall_detail_to_conversion_rate"] = (
+        summary["total_conversions"] / summary["total_detail_views"] if summary["total_detail_views"] else 0.0
+    )
     metrics["summary"] = summary
 
-    merged = _build_merged_dataset(exposures, clicks, conversions)
+    merged = _build_merged_dataset(exposures, clicks, conversions, detail_views)
     breakdowns = _aggregate_breakdowns(merged)
     operations = _aggregate_operations(merged, summary)
 
@@ -306,12 +380,23 @@ def generate_daily_report(target_day: date) -> Dict[str, Any]:
 
     history_for_chart = history[-6:] if len(history) > 6 else history  # up to 6 previous days
     chart_data = [
-        {"date": h.day.isoformat(), **{k: h.summary.get(k) for k in ("total_exposures", "overall_ctr", "overall_cvr")}}
+        {
+            "date": h.day.isoformat(),
+            "total_exposures": h.summary.get("total_exposures"),
+            "total_clicks": h.summary.get("total_clicks"),
+            "total_detail_views": h.summary.get("total_detail_views"),
+            "total_conversions": h.summary.get("total_conversions"),
+            "overall_ctr": h.summary.get("overall_ctr"),
+            "overall_cvr": h.summary.get("overall_cvr"),
+        }
         for h in history_for_chart
     ]
     chart_data.append({
         "date": summary["date"],
         "total_exposures": summary.get("total_exposures"),
+        "total_clicks": summary.get("total_clicks"),
+        "total_detail_views": summary.get("total_detail_views"),
+        "total_conversions": summary.get("total_conversions"),
         "overall_ctr": summary.get("overall_ctr"),
         "overall_cvr": summary.get("overall_cvr"),
     })

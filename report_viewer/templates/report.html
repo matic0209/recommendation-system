@@ -99,6 +99,24 @@
           <div class="col-lg-3 col-md-6">
             <div class="card metric-card shadow-sm">
               <div class="card-body">
+                <h6 class="card-subtitle text-muted">Detail Views</h6>
+                <h3 class="card-title">{{ summary.total_detail_views | default(0) | int }}</h3>
+              </div>
+            </div>
+          </div>
+          <div class="col-lg-3 col-md-6">
+            <div class="card metric-card shadow-sm">
+              <div class="card-body">
+                <h6 class="card-subtitle text-muted">Conversions</h6>
+                <h3 class="card-title">{{ summary.total_conversions | default(0) | int }}</h3>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="row g-3 mt-1">
+          <div class="col-lg-3 col-md-6">
+            <div class="card metric-card shadow-sm">
+              <div class="card-body">
                 <h6 class="card-subtitle text-muted">CTR</h6>
                 <h3 class="card-title">{{ (summary.overall_ctr or 0) * 100 | round(2) }}%</h3>
                 <div class="d-flex gap-3">
@@ -111,12 +129,24 @@
           <div class="col-lg-3 col-md-6">
             <div class="card metric-card shadow-sm">
               <div class="card-body">
-                <h6 class="card-subtitle text-muted">CVR</h6>
-                <h3 class="card-title">{{ (summary.overall_cvr or 0) * 100 | round(2) }}%</h3>
-                <div class="d-flex gap-3">
-                  <div>vs Day: {{ delta_badge(delta_prev.overall_cvr) }}</div>
-                  <div>vs 7d: {{ delta_badge(delta_avg.overall_cvr) }}</div>
-                </div>
+                <h6 class="card-subtitle text-muted">Click → Detail</h6>
+                <h3 class="card-title">{{ (summary.overall_detail_rate or 0) * 100 | round(2) }}%</h3>
+              </div>
+            </div>
+          </div>
+          <div class="col-lg-3 col-md-6">
+            <div class="card metric-card shadow-sm">
+              <div class="card-body">
+                <h6 class="card-subtitle text-muted">Detail → Conversion</h6>
+                <h3 class="card-title">{{ (summary.overall_detail_to_conversion_rate or 0) * 100 | round(2) }}%</h3>
+              </div>
+            </div>
+          </div>
+          <div class="col-lg-3 col-md-6">
+            <div class="card metric-card shadow-sm">
+              <div class="card-body">
+                <h6 class="card-subtitle text-muted">Revenue</h6>
+                <h3 class="card-title">￥{{ summary.total_revenue | round(2) }}</h3>
               </div>
             </div>
           </div>
@@ -260,8 +290,10 @@
                     <th>Reason</th>
                     <th>Exposures</th>
                     <th>Clicks</th>
+                    <th>Detail Views</th>
                     <th>Conversions</th>
                     <th>CTR</th>
+                    <th>Detail Rate</th>
                     <th>CVR</th>
                   </tr>
                 </thead>
@@ -271,8 +303,10 @@
                       <td>{{ row.degrade_reason or "unknown" }}</td>
                       <td>{{ row.exposures | int }}</td>
                       <td>{{ row.clicks | int }}</td>
+                      <td>{{ row.detail_views | int }}</td>
                       <td>{{ row.conversions | int }}</td>
                       <td>{{ (row.ctr or 0) * 100 | round(2) }}%</td>
+                      <td>{{ (row.detail_rate or 0) * 100 | round(2) }}%</td>
                       <td>{{ (row.cvr or 0) * 100 | round(2) }}%</td>
                     </tr>
                   {% else %}
@@ -296,8 +330,10 @@
                     <th>Variant</th>
                     <th>Exposures</th>
                     <th>Clicks</th>
+                    <th>Detail Views</th>
                     <th>Conversions</th>
                     <th>CTR</th>
+                    <th>Detail Rate</th>
                     <th>CVR</th>
                   </tr>
                 </thead>
@@ -307,8 +343,10 @@
                       <td>{{ row.variant or "default" }}</td>
                       <td>{{ row.exposures | int }}</td>
                       <td>{{ row.clicks | int }}</td>
+                      <td>{{ row.detail_views | int }}</td>
                       <td>{{ row.conversions | int }}</td>
                       <td>{{ (row.ctr or 0) * 100 | round(2) }}%</td>
+                      <td>{{ (row.detail_rate or 0) * 100 | round(2) }}%</td>
                       <td>{{ (row.cvr or 0) * 100 | round(2) }}%</td>
                     </tr>
                   {% else %}
@@ -332,8 +370,10 @@
                     <th>Experiment Variant</th>
                     <th>Exposures</th>
                     <th>Clicks</th>
+                    <th>Detail Views</th>
                     <th>Conversions</th>
                     <th>CTR</th>
+                    <th>Detail Rate</th>
                     <th>CVR</th>
                   </tr>
                 </thead>
@@ -343,8 +383,10 @@
                       <td>{{ row.experiment_variant or "control" }}</td>
                       <td>{{ row.exposures | int }}</td>
                       <td>{{ row.clicks | int }}</td>
+                      <td>{{ row.detail_views | int }}</td>
                       <td>{{ row.conversions | int }}</td>
                       <td>{{ (row.ctr or 0) * 100 | round(2) }}%</td>
+                      <td>{{ (row.detail_rate or 0) * 100 | round(2) }}%</td>
                       <td>{{ (row.cvr or 0) * 100 | round(2) }}%</td>
                     </tr>
                   {% else %}
@@ -369,8 +411,10 @@
                     <th>Dataset ID</th>
                     <th>Exposures</th>
                     <th>Clicks</th>
+                    <th>Detail Views</th>
                     <th>Conversions</th>
                     <th>CTR</th>
+                    <th>Detail Rate</th>
                     <th>CVR</th>
                   </tr>
                 </thead>
@@ -380,8 +424,10 @@
                       <td>{{ row.dataset_id }}</td>
                       <td>{{ row.exposures | int }}</td>
                       <td>{{ row.clicks | int }}</td>
+                      <td>{{ row.detail_views | int }}</td>
                       <td>{{ row.conversions | int }}</td>
                       <td>{{ (row.ctr or 0) * 100 | round(2) }}%</td>
+                      <td>{{ (row.detail_rate or 0) * 100 | round(2) }}%</td>
                       <td>{{ (row.cvr or 0) * 100 | round(2) }}%</td>
                     </tr>
                   {% else %}
@@ -414,6 +460,9 @@
 
         const labels = data.map(item => item.date);
         const exposures = data.map(item => item.total_exposures || 0);
+        const clicks = data.map(item => item.total_clicks || 0);
+        const detailViews = data.map(item => item.total_detail_views || 0);
+        const conversions = data.map(item => item.total_conversions || 0);
         const ctr = data.map(item => (item.overall_ctr || 0) * 100);
         const cvr = data.map(item => (item.overall_cvr || 0) * 100);
 
@@ -429,6 +478,33 @@
                 data: exposures,
                 borderColor: '#0d6efd',
                 backgroundColor: 'rgba(13, 110, 253, 0.15)',
+                yAxisID: 'y',
+                fill: true,
+                tension: 0.25,
+              },
+              {
+                label: 'Clicks',
+                data: clicks,
+                borderColor: '#6f42c1',
+                backgroundColor: 'rgba(111, 66, 193, 0.15)',
+                yAxisID: 'y',
+                fill: true,
+                tension: 0.25,
+              },
+              {
+                label: 'Detail Views',
+                data: detailViews,
+                borderColor: '#20c997',
+                backgroundColor: 'rgba(32, 201, 151, 0.15)',
+                yAxisID: 'y',
+                fill: true,
+                tension: 0.25,
+              },
+              {
+                label: 'Conversions',
+                data: conversions,
+                borderColor: '#fd7e14',
+                backgroundColor: 'rgba(253, 126, 20, 0.15)',
                 yAxisID: 'y',
                 fill: true,
                 tension: 0.25,
