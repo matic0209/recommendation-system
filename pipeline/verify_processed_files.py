@@ -1,6 +1,7 @@
-"""Quick sanity checks for processed Matomo and feature artifacts."""
+"""Quick sanity checks for processed Matomo and training artifacts."""
 from __future__ import annotations
 
+import argparse
 import logging
 from pathlib import Path
 from typing import Dict, List, Tuple
@@ -12,17 +13,19 @@ from config.settings import DATA_DIR
 LOGGER = logging.getLogger(__name__)
 PROCESSED_DIR = DATA_DIR / "processed"
 
-REQUIRED_FILES: List[Tuple[str, Tuple[str, ...]]] = [
-    ("recommend_exposures.parquet", ("request_id", "dataset_id")),
-    ("recommend_clicks.parquet", ("request_id", "dataset_id")),
-    ("recommend_conversions.parquet", ("request_id", "dataset_id")),
-    ("recommend_slot_metrics.parquet", ("dataset_id", "position", "exposure_count")),
-    ("recommend_variant_metrics.parquet", ("dataset_id", "variant", "exposure_count")),
-]
+FILE_GROUPS: Dict[str, List[Tuple[str, Tuple[str, ...]]]] = {
+    "matomo": [
+        ("recommend_exposures.parquet", ("request_id", "dataset_id")),
+        ("recommend_clicks.parquet", ("request_id", "dataset_id")),
+        ("recommend_conversions.parquet", ("request_id", "dataset_id")),
+        ("recommend_slot_metrics.parquet", ("dataset_id", "position", "exposure_count")),
+        ("recommend_variant_metrics.parquet", ("dataset_id", "variant", "exposure_count")),
+    ],
+    "training": [
+        ("ranking_slot_metrics.parquet", ("dataset_id", "slot_total_exposures")),
+    ],
+}
 
-OPTIONAL_FILES: List[Tuple[str, Tuple[str, ...]]] = [
-    ("ranking_slot_metrics.parquet", ("dataset_id", "slot_total_exposures")),
-]
 
 def _load_frame(path: Path) -> pd.DataFrame:
     if not path.exists():
@@ -30,10 +33,9 @@ def _load_frame(path: Path) -> pd.DataFrame:
     return pd.read_parquet(path)
 
 
-def verify_processed_files() -> Dict[str, int]:
-    """Ensure key processed artifacts exist and have rows."""
+def _verify_files(file_specs: List[Tuple[str, Tuple[str, ...]]]) -> Dict[str, int]:
     summary: Dict[str, int] = {}
-    for filename, required_columns in REQUIRED_FILES:
+    for filename, required_columns in file_specs:
         path = PROCESSED_DIR / filename
         df = _load_frame(path)
         row_count = len(df)
@@ -44,24 +46,30 @@ def verify_processed_files() -> Dict[str, int]:
         if missing:
             raise ValueError(f"Processed file {filename} missing columns: {', '.join(missing)}")
         LOGGER.info("Verified %s (rows=%d)", filename, row_count)
-
-    for filename, columns in OPTIONAL_FILES:
-        path = PROCESSED_DIR / filename
-        if not path.exists():
-            LOGGER.warning("Optional processed file missing: %s", path)
-            continue
-        df = pd.read_parquet(path)
-        summary[filename] = len(df)
-        missing = [col for col in columns if col not in df.columns]
-        if missing:
-            LOGGER.warning("Optional file %s missing columns: %s", filename, ", ".join(missing))
-        LOGGER.info("Verified optional %s (rows=%d)", filename, len(df))
     return summary
 
 
+def verify_processed_files(group: str) -> Dict[str, int]:
+    if group == "all":
+        summary: Dict[str, int] = {}
+        for name, specs in FILE_GROUPS.items():
+            LOGGER.info("Verifying %s files...", name)
+            summary.update(_verify_files(specs))
+        return summary
+
+    if group not in FILE_GROUPS:
+        raise ValueError(f"Unknown file group '{group}'. Available groups: {', '.join(FILE_GROUPS)}")
+    LOGGER.info("Verifying %s files...", group)
+    return _verify_files(FILE_GROUPS[group])
+
+
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Verify processed parquet artifacts.")
+    parser.add_argument("--group", choices=["matomo", "training", "all"], default="all")
+    args = parser.parse_args()
+
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    summary = verify_processed_files()
+    summary = verify_processed_files(args.group)
     LOGGER.info("Processed artifacts verified: %s", ", ".join(f"{k}={v}" for k, v in summary.items()))
 
 
