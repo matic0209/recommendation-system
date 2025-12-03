@@ -45,17 +45,18 @@ def _normalize_positions(df: pd.DataFrame, exposures: pd.DataFrame, column_name:
     if column_name not in result.columns:
         result[column_name] = pd.NA
 
-    if exposures is not None and not exposures.empty:
-        missing_mask = result[column_name].isna()
-        if missing_mask.any():
-            lookup = exposures[["request_id", "dataset_id", "position"]].drop_duplicates()
-            result = result.merge(
-                lookup.rename(columns={"position": "_exposure_position"}),
-                on=["request_id", "dataset_id"],
-                how="left",
+    missing_mask = result[column_name].isna()
+    if missing_mask.any() and exposures is not None and not exposures.empty:
+        if all(col in result.columns for col in ["request_id", "dataset_id"]) and all(
+            col in exposures.columns for col in ["request_id", "dataset_id", "position"]
+        ):
+            lookup_series = (
+                exposures.drop_duplicates(subset=["request_id", "dataset_id"])
+                .set_index(["request_id", "dataset_id"])["position"]
             )
-            result.loc[missing_mask, column_name] = result.loc[missing_mask, "_exposure_position"]
-            result = result.drop(columns=["_exposure_position"])
+            for idx in result.index[missing_mask]:
+                key = (result.at[idx, "request_id"], result.at[idx, "dataset_id"])
+                result.at[idx, column_name] = lookup_series.get(key, np.nan)
 
     result[column_name] = result[column_name].fillna(-1).astype(int)
     return result
