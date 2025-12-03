@@ -8,7 +8,7 @@
 | 数据 | 来源 | 说明 |
 | --- | --- | --- |
 | 曝光 | `data/evaluation/exposure_log.jsonl` | 推荐 API 每次返回时记录 request_id、variant、degrade_reason 等 |
-| 点击 | `matomo_log_link_visit_action` | 通过 `custom_dimension_2` (request_id) 精确匹配推荐点击 |
+| 点击 | `matomo_log_link_visit_action` | 通过 `custom_dimension_4` (request_id，兼容 1/2 作为回退) 精确匹配推荐点击 |
 | 明细页浏览 | Matomo link action | 解析 `dataDetail/`、`dataAPIDetail/` 访问次数 |
 | 转化 | `matomo_log_conversion` | 按 dataset_id 汇总目标转化和 Revenue |
 

@@ -15,14 +15,63 @@ import pandas as pd
 
 from config.settings import DATA_DIR, MODELS_DIR
 
-REQUEST_ID_DIMENSION = int(os.getenv("MATOMO_REQUEST_DIMENSION", "2"))
-REQUEST_ID_COLUMN = f"custom_dimension_{REQUEST_ID_DIMENSION}"
-REQUEST_ID_COLUMNS: List[str] = []
-for candidate in [REQUEST_ID_COLUMN, "custom_dimension_3", "custom_dimension_1"]:
-    if candidate and candidate not in REQUEST_ID_COLUMNS:
-        REQUEST_ID_COLUMNS.append(candidate)
-POSITION_DIMENSION = os.getenv("MATOMO_POSITION_DIMENSION")
-POSITION_COLUMN = f"custom_dimension_{POSITION_DIMENSION}" if POSITION_DIMENSION else None
+
+def _parse_dimension_list(raw_value: Optional[str], fallback: Optional[str] = None) -> List[int]:
+    """Parse a comma separated list of dimension IDs."""
+    dimensions: List[int] = []
+    if raw_value:
+        for item in raw_value.split(","):
+            item = item.strip()
+            if not item:
+                continue
+            try:
+                dimensions.append(int(item))
+            except ValueError:
+                continue
+    if not dimensions and fallback:
+        fallback = fallback.strip()
+        if fallback:
+            try:
+                dimensions.append(int(fallback))
+            except ValueError:
+                pass
+    return dimensions
+
+
+def _build_dimension_columns(dimensions: List[int]) -> List[str]:
+    """Convert dimension IDs into Matomo column names with de-duplication."""
+    columns: List[str] = []
+    for dim in dimensions:
+        if dim is None or dim <= 0:
+            continue
+        column = f"custom_dimension_{dim}"
+        if column not in columns:
+            columns.append(column)
+    return columns
+
+
+REQUEST_ID_DIMENSIONS = _parse_dimension_list(
+    os.getenv("MATOMO_REQUEST_DIMENSIONS"),
+    os.getenv("MATOMO_REQUEST_DIMENSION", "4"),
+)
+if not REQUEST_ID_DIMENSIONS:
+    REQUEST_ID_DIMENSIONS = [4]
+REQUEST_ID_COLUMNS: List[str] = _build_dimension_columns(REQUEST_ID_DIMENSIONS)
+# Always check legacy columns for backwards compatibility
+for fallback_column in ("custom_dimension_4", "custom_dimension_2", "custom_dimension_3", "custom_dimension_1"):
+    if fallback_column not in REQUEST_ID_COLUMNS:
+        REQUEST_ID_COLUMNS.append(fallback_column)
+
+POSITION_DIMENSIONS = _parse_dimension_list(
+    os.getenv("MATOMO_POSITION_DIMENSIONS"),
+    os.getenv("MATOMO_POSITION_DIMENSION"),
+)
+POSITION_COLUMNS: List[str] = _build_dimension_columns(POSITION_DIMENSIONS)
+if "custom_dimension_4" not in POSITION_COLUMNS:
+    POSITION_COLUMNS.append("custom_dimension_4")
+
+CLICK_METADATA_COLUMN = "custom_dimension_5"
+CLICK_METADATA_PATTERN = re.compile(r"click_(\d+)_([0-9]+)")
 
 LOGGER = logging.getLogger(__name__)
 EVAL_DIR = DATA_DIR / "evaluation"
@@ -98,6 +147,71 @@ def _extract_dataset_from_row(row: pd.Series, mapping: Dict[int, int]) -> Option
     return None
 
 
+def _parse_numeric_value(value: object) -> Optional[int]:
+    """Convert numeric-compatible values to int."""
+    if value is None:
+        return None
+    if isinstance(value, (int, np.integer)):
+        return int(value)
+    if isinstance(value, float):
+        if math.isnan(value):
+            return None
+        return int(value)
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.isdigit():
+            try:
+                return int(stripped)
+            except ValueError:
+                return None
+    return None
+
+
+def _parse_click_metadata(row: pd.Series) -> Tuple[Optional[int], Optional[int]]:
+    """
+    Parse dataset_id and position encoded in the custom click metadata column.
+
+    Frontend pushes values like ``click_{position}_{datasetId}``.
+    """
+    dataset_id: Optional[int] = None
+    position: Optional[int] = None
+    value = row.get(CLICK_METADATA_COLUMN)
+    if isinstance(value, str):
+        match = CLICK_METADATA_PATTERN.match(value.strip())
+        if match:
+            try:
+                position = int(match.group(1))
+                dataset_id = int(match.group(2))
+            except ValueError:
+                position = None
+                dataset_id = dataset_id or None
+    return dataset_id, position
+
+
+def _extract_position_from_row(row: pd.Series, meta_position: Optional[int] = None) -> Optional[int]:
+    """Extract the recommendation position from configured columns or encoded metadata."""
+    if meta_position is not None:
+        return meta_position
+
+    for column in POSITION_COLUMNS:
+        value = row.get(column)
+        position = _parse_numeric_value(value)
+        if position is not None:
+            return position
+
+    value = row.get("url", "")
+    if isinstance(value, str) and value:
+        match = re.search(r"pos=(\d+)", value)
+        if match:
+            try:
+                return int(match.group(1))
+            except ValueError:
+                pass
+
+    _, derived_position = _parse_click_metadata(row)
+    return derived_position
+
+
 def _get_request_id_from_columns(row: pd.Series) -> Optional[str]:
     for column in REQUEST_ID_COLUMNS:
         value = row.get(column, "")
@@ -154,6 +268,9 @@ def _load_recommend_clicks(mapping: Dict[int, int]) -> pd.DataFrame:
             continue
 
         dataset_id = _extract_dataset_from_row(row, mapping)
+        meta_dataset_id, meta_position = _parse_click_metadata(row)
+        if dataset_id is None and meta_dataset_id is not None:
+            dataset_id = meta_dataset_id
         if dataset_id is None:
             continue
 
@@ -167,13 +284,7 @@ def _load_recommend_clicks(mapping: Dict[int, int]) -> pd.DataFrame:
         if pd.isna(server_time):
             continue
 
-        # 尝试提取position
-        url = row.get('url', '')
-        position = None
-        if isinstance(url, str):
-            pos_match = re.search(r'pos=(\d+)', url)
-            if pos_match:
-                position = int(pos_match.group(1))
+        position = _extract_position_from_row(row, meta_position)
 
         records.append({
             "dataset_id": int(dataset_id),
@@ -217,9 +328,6 @@ def _load_recommend_conversions(mapping: Dict[int, int]) -> pd.DataFrame:
         dataset_id = _map_action_value(conv_row.get("idaction_url"), mapping)
         if dataset_id is None:
             dataset_id = _parse_dataset_id(conv_row.get("url"))
-        if dataset_id is None:
-            continue
-
         server_time = pd.to_datetime(conv_row.get("server_time"), errors="coerce")
         if pd.isna(server_time):
             continue
@@ -230,27 +338,16 @@ def _load_recommend_conversions(mapping: Dict[int, int]) -> pd.DataFrame:
         except (ValueError, TypeError):
             revenue = 0.0
 
-        # Method 1: Try to get request_id from conversion's custom_dimension_1
         request_id = None
-        position = None
+        position = _extract_position_from_row(conv_row)
 
         custom_dim = _get_request_id_from_columns(conv_row)
         if custom_dim:
             request_id = custom_dim
-            LOGGER.debug("Found request_id in conversion custom_dimension_1: %s", request_id)
-
-            # Try to get position from custom_dimension_2
-            if POSITION_COLUMN and POSITION_COLUMN in conv_row:
-                pos_dim = conv_row.get(POSITION_COLUMN, '')
-            else:
-                pos_dim = conv_row.get('custom_dimension_2', '')
-            if pos_dim not in (None, ''):
-                try:
-                    position = int(pos_dim)
-                except (ValueError, TypeError):
-                    pass
+            LOGGER.debug("Found request_id in conversion custom dimension: %s", request_id)
 
         # Method 2: If no request_id, try session-based matching
+        clicked_row: Optional[pd.Series] = None
         if not request_id and visit_actions is not None:
             idvisit = conv_row.get('idvisit')
             if idvisit and not pd.isna(idvisit):
@@ -277,13 +374,18 @@ def _load_recommend_conversions(mapping: Dict[int, int]) -> pd.DataFrame:
                             if req_id and isinstance(req_id, str) and req_id.startswith('req_'):
                                 request_id = req_id
                                 LOGGER.debug("Found request_id via session matching: %s", request_id)
+                                clicked_row = latest
 
-                                # Try to extract position from URL
-                                url = latest.get('url', '')
-                                if isinstance(url, str) and 'pos=' in url:
-                                    pos_match = re.search(r'pos=(\d+)', url)
-                                    if pos_match:
-                                        position = int(pos_match.group(1))
+        if clicked_row is not None:
+            meta_dataset_id, meta_position = _parse_click_metadata(clicked_row)
+            derived_dataset = _extract_dataset_from_row(clicked_row, mapping)
+            if dataset_id is None:
+                dataset_id = meta_dataset_id or derived_dataset
+            if position is None:
+                position = _extract_position_from_row(clicked_row, meta_position)
+
+        if dataset_id is None:
+            continue
 
         records.append({
             "dataset_id": int(dataset_id),
