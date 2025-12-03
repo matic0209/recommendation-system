@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Tuple
+from typing import List, Tuple
 
 import numpy as np
 import pandas as pd
@@ -17,6 +17,8 @@ EXPOSURES_PATH = PROCESSED_DIR / "recommend_exposures.parquet"
 CLICKS_PATH = PROCESSED_DIR / "recommend_clicks.parquet"
 CONVERSIONS_PATH = PROCESSED_DIR / "recommend_conversions.parquet"
 SLOT_METRICS_PATH = PROCESSED_DIR / "recommend_slot_metrics.parquet"
+VARIANT_METRICS_PATH = PROCESSED_DIR / "recommend_variant_metrics.parquet"
+CONTEXT_COLUMNS: List[str] = ["variant", "endpoint", "page_id", "algorithm_version"]
 
 
 def _ensure_processed_dir() -> None:
@@ -124,6 +126,92 @@ def _compute_slot_metrics(exposures: pd.DataFrame, clicks: pd.DataFrame, convers
     return metrics
 
 
+def _prepare_context_lookup(exposures: pd.DataFrame) -> pd.DataFrame:
+    if exposures.empty:
+        return pd.DataFrame(columns=["request_id", "dataset_id"] + CONTEXT_COLUMNS)
+    lookup = exposures[["request_id", "dataset_id"] + CONTEXT_COLUMNS].drop_duplicates()
+    return lookup
+
+
+def _attach_context(df: pd.DataFrame, lookup: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        result = df.copy()
+        for column in CONTEXT_COLUMNS:
+            result[column] = pd.NA
+        return result
+    if lookup.empty:
+        result = df.copy()
+        for column in CONTEXT_COLUMNS:
+            result[column] = pd.NA
+        return result
+    return df.merge(lookup, on=["request_id", "dataset_id"], how="left")
+
+
+def _standardize_context(result: pd.DataFrame) -> pd.DataFrame:
+    if result.empty:
+        for column in CONTEXT_COLUMNS:
+            if column not in result.columns:
+                result[column] = pd.Series(dtype="object")
+        return result
+    defaults = {
+        "variant": "default",
+        "endpoint": "unknown",
+        "page_id": "",
+        "algorithm_version": "unknown",
+    }
+    for column, default in defaults.items():
+        if column not in result.columns:
+            result[column] = default
+        else:
+            result[column] = result[column].fillna(default)
+    return result
+
+
+def _compute_variant_metrics(exposures: pd.DataFrame, clicks: pd.DataFrame, conversions: pd.DataFrame) -> pd.DataFrame:
+    if exposures.empty:
+        return pd.DataFrame(columns=["dataset_id"] + CONTEXT_COLUMNS + ["exposure_count", "click_count", "conversion_count", "ctr"])
+
+    lookup = _prepare_context_lookup(exposures)
+    exposures_ctx = _standardize_context(exposures[["dataset_id"] + CONTEXT_COLUMNS].copy())
+
+    clicks_ctx = _attach_context(clicks[["request_id", "dataset_id"]].copy(), lookup)
+    clicks_ctx = _standardize_context(clicks_ctx)
+
+    conversions_ctx = _attach_context(conversions[["request_id", "dataset_id"]].copy(), lookup)
+    conversions_ctx = _standardize_context(conversions_ctx)
+
+    group_cols = ["dataset_id"] + CONTEXT_COLUMNS
+    exposure_counts = (
+        exposures_ctx.groupby(group_cols)
+        .size()
+        .reset_index(name="exposure_count")
+    )
+    click_counts = (
+        clicks_ctx.groupby(group_cols)
+        .size()
+        .reset_index(name="click_count")
+    )
+    conversion_counts = (
+        conversions_ctx.groupby(group_cols)
+        .size()
+        .reset_index(name="conversion_count")
+    )
+
+    metrics = exposure_counts.merge(click_counts, on=group_cols, how="left")
+    metrics = metrics.merge(conversion_counts, on=group_cols, how="left")
+    for column in ["click_count", "conversion_count"]:
+        if column not in metrics.columns:
+            metrics[column] = 0
+        metrics[column] = metrics[column].fillna(0)
+    metrics["ctr"] = np.where(
+        metrics["exposure_count"] > 0,
+        metrics["click_count"] / metrics["exposure_count"],
+        0.0,
+    )
+    metrics = metrics.sort_values(group_cols).reset_index(drop=True)
+    return metrics
+
+
 def aggregate_events() -> None:
     """Aggregate Matomo exposure/click/conversion events into parquet files."""
     _ensure_processed_dir()
@@ -171,6 +259,15 @@ def aggregate_events() -> None:
     LOGGER.info("Computing slot-level metrics...")
     slot_metrics = _compute_slot_metrics(exposures, clicks, conversions)
     _save_dataframe(slot_metrics, SLOT_METRICS_PATH)
+
+    LOGGER.info("Computing variant-level metrics...")
+    variant_metrics = _compute_variant_metrics(
+        exposures[["request_id", "dataset_id"] + CONTEXT_COLUMNS].copy()
+        if not exposures.empty else exposures.copy(),
+        clicks[["request_id", "dataset_id"]].copy(),
+        conversions[["request_id", "dataset_id"]].copy(),
+    )
+    _save_dataframe(variant_metrics, VARIANT_METRICS_PATH)
     LOGGER.info("Matomo aggregation completed.")
 
 
