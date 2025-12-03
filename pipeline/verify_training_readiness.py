@@ -18,6 +18,7 @@ EVAL_DIR = DATA_DIR / "evaluation"
 EXPOSURES_PATH = PROCESSED_DIR / "recommend_exposures.parquet"
 CLICKS_PATH = PROCESSED_DIR / "recommend_clicks.parquet"
 LABELS_PATH = PROCESSED_DIR / "ranking_labels_by_dataset.parquet"
+SLOT_LABELS_PATH = PROCESSED_DIR / "ranking_slot_metrics.parquet"
 REPORT_PATH = EVAL_DIR / "training_readiness.json"
 
 
@@ -34,6 +35,7 @@ def verify() -> dict:
     exposures = _load_parquet(EXPOSURES_PATH)
     clicks = _load_parquet(CLICKS_PATH)
     labels = _load_parquet(LABELS_PATH)
+    slot_metrics = _load_parquet(SLOT_LABELS_PATH)
 
     summary = {
         "timestamp": datetime.utcnow().isoformat() + "Z",
@@ -43,6 +45,7 @@ def verify() -> dict:
         "click_request_ids": int(clicks["request_id"].nunique()) if "request_id" in clicks.columns else 0,
         "label_rows": int(len(labels)),
         "positive_datasets": int(labels["label"].sum()) if "label" in labels.columns else 0,
+        "slot_metric_rows": int(len(slot_metrics)),
     }
 
     errors = []
@@ -56,6 +59,9 @@ def verify() -> dict:
 
     if summary["positive_datasets"] < 5:
         warnings.append("Too few positive datasets (labels) for robust ranking training")
+
+    if summary["slot_metric_rows"] == 0:
+        warnings.append("Slot-level metrics are empty; CTR/CVR features unavailable")
 
     summary["warnings"] = warnings
     summary["errors"] = errors

@@ -14,8 +14,10 @@ PROCESSED_DIR = DATA_DIR / "processed"
 EXPOSURES_PATH = PROCESSED_DIR / "recommend_exposures.parquet"
 CLICKS_PATH = PROCESSED_DIR / "recommend_clicks.parquet"
 CONVERSIONS_PATH = PROCESSED_DIR / "recommend_conversions.parquet"
+SLOT_METRICS_SOURCE_PATH = PROCESSED_DIR / "recommend_slot_metrics.parquet"
 SAMPLES_PATH = PROCESSED_DIR / "ranking_training_samples.parquet"
 DATASET_LABELS_PATH = PROCESSED_DIR / "ranking_labels_by_dataset.parquet"
+SLOT_LABELS_PATH = PROCESSED_DIR / "ranking_slot_metrics.parquet"
 
 
 def _load_optional_parquet(path: Path, expected_columns: Tuple[str, ...]) -> pd.DataFrame:
@@ -99,8 +101,22 @@ def build_training_labels() -> None:
         dataset_labels = pd.DataFrame(columns=["dataset_id", "label", "click_count", "exposure_count"])
 
     dataset_labels.to_parquet(DATASET_LABELS_PATH, index=False)
-    LOGGER.info("Saved dataset-level labels: %s (%d rows; positives=%d)",
-                DATASET_LABELS_PATH, len(dataset_labels), int(dataset_labels["label"].sum() if not dataset_labels.empty else 0))
+    LOGGER.info(
+        "Saved dataset-level labels: %s (%d rows; positives=%d)",
+        DATASET_LABELS_PATH,
+        len(dataset_labels),
+        int(dataset_labels["label"].sum() if not dataset_labels.empty else 0),
+    )
+
+    slot_metrics = _load_optional_parquet(
+        SLOT_METRICS_SOURCE_PATH,
+        ("dataset_id", "position", "exposure_count", "click_count", "conversion_count", "conversion_revenue", "ctr", "cvr"),
+    )
+    if not slot_metrics.empty:
+        slot_metrics["dataset_id"] = slot_metrics["dataset_id"].astype(int)
+        slot_metrics["position"] = slot_metrics["position"].astype(int)
+    slot_metrics.to_parquet(SLOT_LABELS_PATH, index=False)
+    LOGGER.info("Saved slot-level metrics for ranking: %s (%d rows)", SLOT_LABELS_PATH, len(slot_metrics))
 
 
 def main() -> None:

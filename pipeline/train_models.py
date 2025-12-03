@@ -7,7 +7,7 @@ import pickle
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Iterable, List, Tuple
+from typing import Dict, Iterable, List, Tuple, Optional
 
 import mlflow
 import numpy as np
@@ -236,10 +236,80 @@ def _update_registry(entry: Dict[str, object]) -> None:
     LOGGER.info("Model registry updated (run_id=%s)", entry.get("run_id"))
 
 
+def _aggregate_slot_metrics(slot_metrics: pd.DataFrame) -> pd.DataFrame:
+    if slot_metrics.empty:
+        return pd.DataFrame(
+            columns=[
+                "dataset_id",
+                "slot_total_exposures",
+                "slot_total_clicks",
+                "slot_total_conversions",
+                "slot_total_revenue",
+                "slot_mean_ctr",
+                "slot_max_ctr",
+                "slot_mean_cvr",
+                "slot_position_coverage",
+                "slot_ctr_top1",
+                "slot_ctr_top3",
+                "slot_cvr_top1",
+                "slot_cvr_top3",
+            ]
+        )
+
+    metrics = slot_metrics.copy()
+    metrics["dataset_id"] = metrics["dataset_id"].astype(int)
+    metrics["position"] = metrics["position"].astype(int)
+
+    grouped = (
+        metrics.groupby("dataset_id")
+        .agg(
+            slot_total_exposures=("exposure_count", "sum"),
+            slot_total_clicks=("click_count", "sum"),
+            slot_total_conversions=("conversion_count", "sum"),
+            slot_total_revenue=("conversion_revenue", "sum"),
+            slot_mean_ctr=("ctr", "mean"),
+            slot_max_ctr=("ctr", "max"),
+            slot_mean_cvr=("cvr", "mean"),
+            slot_position_coverage=("position", "nunique"),
+        )
+        .reset_index()
+    )
+
+    top1 = metrics[metrics["position"] == 1].groupby("dataset_id").agg(
+        slot_ctr_top1=("ctr", "mean"),
+        slot_cvr_top1=("cvr", "mean"),
+    )
+    top3 = metrics[metrics["position"] <= 3].groupby("dataset_id").agg(
+        slot_ctr_top3=("ctr", "mean"),
+        slot_cvr_top3=("cvr", "mean"),
+    )
+
+    merged = grouped.merge(top1, on="dataset_id", how="left").merge(top3, on="dataset_id", how="left")
+    for col in [
+        "slot_ctr_top1",
+        "slot_cvr_top1",
+        "slot_ctr_top3",
+        "slot_cvr_top3",
+    ]:
+        if col not in merged.columns:
+            merged[col] = 0.0
+        merged[col] = merged[col].fillna(0.0)
+    merged["slot_total_exposures"] = merged["slot_total_exposures"].fillna(0.0)
+    merged["slot_total_clicks"] = merged["slot_total_clicks"].fillna(0.0)
+    merged["slot_total_conversions"] = merged["slot_total_conversions"].fillna(0.0)
+    merged["slot_total_revenue"] = merged["slot_total_revenue"].fillna(0.0)
+    merged["slot_mean_ctr"] = merged["slot_mean_ctr"].fillna(0.0)
+    merged["slot_max_ctr"] = merged["slot_max_ctr"].fillna(0.0)
+    merged["slot_mean_cvr"] = merged["slot_mean_cvr"].fillna(0.0)
+    merged["slot_position_coverage"] = merged["slot_position_coverage"].fillna(0.0)
+    return merged
+
+
 def _prepare_ranking_dataset(
     dataset_features: pd.DataFrame,
     dataset_stats: pd.DataFrame,
     labels: Optional[pd.DataFrame],
+    slot_metrics: Optional[pd.DataFrame],
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.Series]:
     if dataset_features.empty:
         return pd.DataFrame(), pd.DataFrame(), pd.Series(dtype=int)
@@ -279,6 +349,28 @@ def _prepare_ranking_dataset(
             )
         else:
             features[col] = 0.0
+
+    slot_features = _aggregate_slot_metrics(slot_metrics if slot_metrics is not None else pd.DataFrame())
+    if not slot_features.empty:
+        merged = merged.merge(slot_features, on="dataset_id", how="left")
+    slot_columns = [
+        "slot_total_exposures",
+        "slot_total_clicks",
+        "slot_total_conversions",
+        "slot_total_revenue",
+        "slot_mean_ctr",
+        "slot_max_ctr",
+        "slot_mean_cvr",
+        "slot_position_coverage",
+        "slot_ctr_top1",
+        "slot_ctr_top3",
+        "slot_cvr_top1",
+        "slot_cvr_top3",
+    ]
+    for col in slot_columns:
+        if col not in merged.columns:
+            merged[col] = 0.0
+        features[col] = merged[col].replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
     if labels is not None and not labels.empty and "label" in labels.columns:
         label_series = labels.set_index("dataset_id")["label"]
@@ -373,6 +465,7 @@ def main() -> None:
     dataset_features = _load_frame(PROCESSED_DIR / "dataset_features.parquet")
     dataset_stats = _load_frame(PROCESSED_DIR / "dataset_stats.parquet")
     ranking_labels = _load_ranking_labels()
+    slot_metrics = _load_frame(PROCESSED_DIR / "ranking_slot_metrics.parquet")
 
     # Prefer enhanced feature views when available
     interactions_v2 = _load_frame(PROCESSED_DIR / "interactions_v2.parquet")
@@ -396,6 +489,7 @@ def main() -> None:
         dataset_features,
         dataset_stats,
         ranking_labels,
+        slot_metrics,
     )
     ranking_model, ranking_auc = _train_ranking_model(ranking_features, ranking_target)
     ranking_scores = _score_ranking_model(ranking_model, ranking_features)
