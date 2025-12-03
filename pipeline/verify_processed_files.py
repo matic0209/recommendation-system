@@ -18,9 +18,11 @@ REQUIRED_FILES: List[Tuple[str, Tuple[str, ...]]] = [
     ("recommend_conversions.parquet", ("request_id", "dataset_id")),
     ("recommend_slot_metrics.parquet", ("dataset_id", "position", "exposure_count")),
     ("recommend_variant_metrics.parquet", ("dataset_id", "variant", "exposure_count")),
-    ("ranking_slot_metrics.parquet", ("dataset_id", "slot_total_exposures")),
 ]
 
+OPTIONAL_FILES: List[Tuple[str, Tuple[str, ...]]] = [
+    ("ranking_slot_metrics.parquet", ("dataset_id", "slot_total_exposures")),
+]
 
 def _load_frame(path: Path) -> pd.DataFrame:
     if not path.exists():
@@ -42,6 +44,18 @@ def verify_processed_files() -> Dict[str, int]:
         if missing:
             raise ValueError(f"Processed file {filename} missing columns: {', '.join(missing)}")
         LOGGER.info("Verified %s (rows=%d)", filename, row_count)
+
+    for filename, columns in OPTIONAL_FILES:
+        path = PROCESSED_DIR / filename
+        if not path.exists():
+            LOGGER.warning("Optional processed file missing: %s", path)
+            continue
+        df = pd.read_parquet(path)
+        summary[filename] = len(df)
+        missing = [col for col in columns if col not in df.columns]
+        if missing:
+            LOGGER.warning("Optional file %s missing columns: %s", filename, ", ".join(missing))
+        LOGGER.info("Verified optional %s (rows=%d)", filename, len(df))
     return summary
 
 
