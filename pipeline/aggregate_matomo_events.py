@@ -178,15 +178,20 @@ def _compute_variant_metrics(exposures: pd.DataFrame, clicks: pd.DataFrame, conv
 
     lookup = _prepare_context_lookup(exposures)
     exposures_ctx = exposures.copy()
+    exposures_ctx["dataset_id"] = pd.to_numeric(exposures_ctx.get("dataset_id"), errors="coerce").fillna(-1).astype(int)
     for column in CONTEXT_COLUMNS:
         if column not in exposures_ctx.columns:
             exposures_ctx[column] = pd.NA
     exposures_ctx = _standardize_context(exposures_ctx[["dataset_id"] + CONTEXT_COLUMNS].copy())
 
-    clicks_ctx = _attach_context(clicks[["request_id", "dataset_id"]].copy(), lookup)
+    clicks_ctx = clicks.copy()
+    clicks_ctx["dataset_id"] = pd.to_numeric(clicks_ctx.get("dataset_id"), errors="coerce").fillna(-1).astype(int)
+    clicks_ctx = _attach_context(clicks_ctx[["request_id", "dataset_id"]], lookup)
     clicks_ctx = _standardize_context(clicks_ctx)
 
-    conversions_ctx = _attach_context(conversions[["request_id", "dataset_id"]].copy(), lookup)
+    conversions_ctx = conversions.copy()
+    conversions_ctx["dataset_id"] = pd.to_numeric(conversions_ctx.get("dataset_id"), errors="coerce").fillna(-1).astype(int)
+    conversions_ctx = _attach_context(conversions_ctx[["request_id", "dataset_id"]], lookup)
     conversions_ctx = _standardize_context(conversions_ctx)
 
     group_cols = ["dataset_id"] + CONTEXT_COLUMNS
