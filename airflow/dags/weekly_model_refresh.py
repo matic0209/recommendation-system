@@ -63,6 +63,11 @@ with DAG(
         bash_command="python -m pipeline.aggregate_matomo_events",
     )
 
+    verify_processed = BashOperator(
+        task_id="verify_processed_files",
+        bash_command="python -m pipeline.verify_processed_files",
+    )
+
     build_training_labels = BashOperator(
         task_id="build_training_labels",
         bash_command="python -m pipeline.build_training_labels",
@@ -102,4 +107,9 @@ with DAG(
         bash_command="python -m pipeline.evaluate_v2",
     )
 
-    aggregate_matomo_events >> build_training_labels >> verify_readiness >> build_features >> train_models >> recall_engine >> reload_api_models >> evaluate_tracking
+    optimize_experiments = BashOperator(
+        task_id="optimize_experiments",
+        bash_command="python -m pipeline.variant_optimizer --experiment recommendation_detail --endpoint recommend_detail",
+    )
+
+    aggregate_matomo_events >> verify_processed >> build_training_labels >> verify_readiness >> build_features >> train_models >> recall_engine >> reload_api_models >> evaluate_tracking >> optimize_experiments

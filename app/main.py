@@ -64,6 +64,30 @@ EXECUTOR_MAX_WORKERS = int(os.getenv("RECO_THREAD_POOL_WORKERS", "4"))
 EXECUTOR = ThreadPoolExecutor(max_workers=EXECUTOR_MAX_WORKERS)
 
 
+class ExperimentFileHandler(FileSystemEventHandler):
+    def __init__(self, config_path: Path):
+        super().__init__()
+        self.config_path = config_path.resolve()
+
+    def on_modified(self, event):
+        if event.is_directory:
+            return
+        try:
+            changed = Path(event.src_path).resolve()
+        except FileNotFoundError:
+            return
+        if changed != self.config_path:
+            return
+        try:
+            app.state.experiments = load_experiments(self.config_path)
+            LOGGER.info(
+                "Experiments config reloaded automatically (%d experiments)",
+                len(app.state.experiments),
+            )
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("Failed to reload experiments after file change: %s", exc)
+
+
 def _executor_queue_size() -> int:
     queue = getattr(EXECUTOR, "_work_queue", None)
     if queue is None:
@@ -1217,8 +1241,19 @@ def load_models() -> None:
     dataset_ids = _collect_dataset_ids(bundle)
     feature_store = _create_feature_store()
     app.state.feature_store = feature_store
-    experiment_config_path = Path(os.getenv("EXPERIMENT_CONFIG_PATH", BASE_DIR / "config" / "experiments.yaml"))
+    experiment_config_path = Path(os.getenv("EXPERIMENT_CONFIG_PATH", BASE_DIR / "config" / "experiments.yaml")).resolve()
     app.state.experiments = load_experiments(experiment_config_path)
+    existing_observer = getattr(app.state, "experiment_observer", None)
+    if existing_observer:
+        existing_observer.stop()
+        existing_observer.join(timeout=2)
+    experiment_handler = ExperimentFileHandler(experiment_config_path)
+    experiment_observer = Observer()
+    experiment_observer.schedule(experiment_handler, experiment_config_path.parent.as_posix(), recursive=False)
+    experiment_observer.daemon = True
+    experiment_observer.start()
+    app.state.experiment_observer = experiment_observer
+    app.state.experiment_config_path = experiment_config_path
 
     metadata, dataset_tags, raw_features = _load_dataset_metadata(
         feature_store=feature_store,
@@ -1274,6 +1309,15 @@ def load_models() -> None:
         len(user_history),
         bundle.run_id or "unknown",
     )
+
+
+@app.on_event("shutdown")
+def shutdown_event() -> None:
+    observer = getattr(app.state, "experiment_observer", None)
+    if observer:
+        observer.stop()
+        observer.join(timeout=2)
+        app.state.experiment_observer = None
 
 
 @app.get("/health")
