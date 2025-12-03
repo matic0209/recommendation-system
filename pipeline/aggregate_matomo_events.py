@@ -168,7 +168,7 @@ def _standardize_context(result: pd.DataFrame) -> pd.DataFrame:
         if column not in result.columns:
             result[column] = default
         else:
-            result[column] = result[column].fillna(default)
+            result[column] = result[column].fillna(default).astype(str)
     return result
 
 
