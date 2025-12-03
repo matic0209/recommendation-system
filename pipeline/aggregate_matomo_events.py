@@ -129,7 +129,11 @@ def _compute_slot_metrics(exposures: pd.DataFrame, clicks: pd.DataFrame, convers
 def _prepare_context_lookup(exposures: pd.DataFrame) -> pd.DataFrame:
     if exposures.empty:
         return pd.DataFrame(columns=["request_id", "dataset_id"] + CONTEXT_COLUMNS)
-    lookup = exposures[["request_id", "dataset_id"] + CONTEXT_COLUMNS].drop_duplicates()
+    working = exposures.copy()
+    for column in CONTEXT_COLUMNS:
+        if column not in working.columns:
+            working[column] = pd.NA
+    lookup = working[["request_id", "dataset_id"] + CONTEXT_COLUMNS].drop_duplicates()
     return lookup
 
 
@@ -172,7 +176,11 @@ def _compute_variant_metrics(exposures: pd.DataFrame, clicks: pd.DataFrame, conv
         return pd.DataFrame(columns=["dataset_id"] + CONTEXT_COLUMNS + ["exposure_count", "click_count", "conversion_count", "ctr"])
 
     lookup = _prepare_context_lookup(exposures)
-    exposures_ctx = _standardize_context(exposures[["dataset_id"] + CONTEXT_COLUMNS].copy())
+    exposures_ctx = exposures.copy()
+    for column in CONTEXT_COLUMNS:
+        if column not in exposures_ctx.columns:
+            exposures_ctx[column] = pd.NA
+    exposures_ctx = _standardize_context(exposures_ctx[["dataset_id"] + CONTEXT_COLUMNS].copy())
 
     clicks_ctx = _attach_context(clicks[["request_id", "dataset_id"]].copy(), lookup)
     clicks_ctx = _standardize_context(clicks_ctx)

@@ -158,6 +158,33 @@ DEFAULT_CHANNEL_WEIGHTS = {
 }
 
 
+def _detect_device_type(user_agent: str) -> str:
+    if not user_agent:
+        return "unknown"
+    ua = user_agent.lower()
+    if "ipad" in ua or "tablet" in ua:
+        return "tablet"
+    if any(keyword in ua for keyword in ["iphone", "android", "mobile"]):
+        return "mobile"
+    if any(keyword in ua for keyword in ["windows", "macintosh", "linux"]):
+        return "desktop"
+    return "unknown"
+
+
+def _extract_request_context(request: Request) -> Dict[str, str]:
+    headers = request.headers
+    source = headers.get("X-Recommend-Source") or request.query_params.get("source") or "unknown"
+    device_type = _detect_device_type(headers.get("User-Agent", ""))
+    locale = headers.get("Accept-Language", "unknown").split(",")[0].strip().lower() or "unknown"
+    client_app = headers.get("X-Client-App") or ""
+    return {
+        "source": source,
+        "device_type": device_type,
+        "locale": locale,
+        "client_app": client_app,
+    }
+
+
 @app.middleware("http")
 async def request_context_middleware(request: Request, call_next):
     """Attach request ID and basic timing information to each request."""
@@ -204,6 +231,9 @@ class RecommendationResponse(BaseModel):
     recommendations: List[RecommendationItem]
     request_id: str  # 用于前端埋点追踪
     algorithm_version: Optional[str] = None  # 算法版本，用于A/B对比
+    variant: str = "primary"
+    experiment_variant: Optional[str] = None
+    request_context: Optional[Dict[str, str]] = None
 
 
 class SimilarResponse(BaseModel):
@@ -211,6 +241,9 @@ class SimilarResponse(BaseModel):
     similar_items: List[RecommendationItem]
     request_id: str  # 用于前端埋点追踪
     algorithm_version: Optional[str] = None  # 算法版本，用于A/B对比
+    variant: str = "primary"
+    experiment_variant: Optional[str] = None
+    request_context: Optional[Dict[str, str]] = None
 
 
 class ReloadRequest(BaseModel):
@@ -1087,6 +1120,7 @@ def _log_exposure(
     request_id: str,
     degrade_reason: Optional[str],
     experiment_variant: Optional[str] = None,
+    request_context: Optional[Dict[str, str]] = None,
 ) -> None:
     exposure_items = [
         {
@@ -1097,6 +1131,10 @@ def _log_exposure(
         for item in items
     ]
     context = {"endpoint": event, "variant": variant}
+    if request_context:
+        for key, value in request_context.items():
+            if value not in (None, ""):
+                context[key] = value
     if degrade_reason:
         context["degrade_reason"] = degrade_reason
     if experiment_variant:
@@ -1405,6 +1443,7 @@ async def get_similar(
     status = "success"
     degrade_reason: Optional[str] = None
     variant = "primary"
+    request_context = _extract_request_context(request)
 
     metrics_tracker = get_metrics_tracker()
     state = _get_app_state()
@@ -1561,7 +1600,9 @@ async def get_similar(
             dataset_id=dataset_id,
             similar_items=items[:limit],
             request_id=request_id,
-            algorithm_version=run_id
+            algorithm_version=run_id,
+            variant=variant,
+            request_context=request_context,
         )
 
         # 设置推荐上下文到 Sentry
@@ -1584,6 +1625,7 @@ async def get_similar(
             request_id=request_id,
             degrade_reason=degrade_reason,
             experiment_variant=None,
+            request_context=request_context,
         )
 
         if cache and cache.enabled and degrade_reason is None:
@@ -1634,6 +1676,7 @@ async def recommend_for_detail(
     status = "success"
     degrade_reason: Optional[str] = None
     variant = "primary"
+    request_context = _extract_request_context(request)
 
     state = _get_app_state()
     metrics_tracker = get_metrics_tracker()
@@ -1817,7 +1860,10 @@ async def recommend_for_detail(
             dataset_id=dataset_id,
             recommendations=items[:limit],
             request_id=request_id,
-            algorithm_version=run_id
+            algorithm_version=run_id,
+            variant=variant,
+            experiment_variant=experiment_variant,
+            request_context=request_context,
         )
 
         # 设置推荐上下文到 Sentry
@@ -1840,6 +1886,7 @@ async def recommend_for_detail(
             request_id=request_id,
             degrade_reason=degrade_reason,
             experiment_variant=experiment_variant,
+            request_context=request_context,
         )
 
         if cache and cache.enabled and user_id and degrade_reason is None:

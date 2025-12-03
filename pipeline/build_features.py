@@ -395,6 +395,20 @@ def main() -> None:
         len(dataset_features_v2.columns),
     )
 
+    # Matomo CTR/CVR 特征融合 (dataset_features_v3)
+    slot_metrics_path = PROCESSED_DIR / "ranking_slot_metrics.parquet"
+    if slot_metrics_path.exists() and not dataset_features_v2.empty:
+        try:
+            slot_metrics = pd.read_parquet(slot_metrics_path)
+            merged = dataset_features_v2.merge(slot_metrics, on="dataset_id", how="left")
+            numeric_cols = merged.select_dtypes(include=[np.number]).columns
+            merged[numeric_cols] = merged[numeric_cols].fillna(0.0)
+            v3_path = PROCESSED_DIR / "dataset_features_v3.parquet"
+            merged.to_parquet(v3_path, index=False)
+            LOGGER.info("Saved dataset features v3 with Matomo signals to %s", v3_path)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("Failed to build dataset_features_v3: %s", exc)
+
     redis_url = os.getenv("FEATURE_REDIS_URL") or os.getenv("REDIS_FEATURE_URL")
     if redis_url:
         parsed = urllib.parse.urlparse(redis_url)

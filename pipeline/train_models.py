@@ -532,6 +532,7 @@ def main() -> None:
     slot_metrics = _load_frame(PROCESSED_DIR / "ranking_slot_metrics.parquet")
 
     # Prefer enhanced feature views when available
+    dataset_features_v3 = _load_frame(PROCESSED_DIR / "dataset_features_v3.parquet")
     interactions_v2 = _load_frame(PROCESSED_DIR / "interactions_v2.parquet")
     if not interactions_v2.empty:
         interactions = interactions_v2
@@ -539,6 +540,8 @@ def main() -> None:
     dataset_features_v2 = _load_frame(PROCESSED_DIR / "dataset_features_v2.parquet")
     if not dataset_features_v2.empty:
         dataset_features = dataset_features_v2
+    if not dataset_features_v3.empty:
+        dataset_features = dataset_features_v3
 
     dataset_stats_v2 = _load_frame(PROCESSED_DIR / "dataset_stats_v2.parquet")
     if not dataset_stats_v2.empty:

@@ -5,8 +5,13 @@ import numpy as np
 import pandas as pd
 from typing import List, Dict, Any, Optional
 import logging
-from sklearn.linear_model import LinearRegression
-from sklearn.ensemble import RandomForestRegressor
+
+try:
+    from lightgbm import LGBMRegressor
+    LIGHTGBM_AVAILABLE = True
+except ImportError:  # pragma: no cover
+    from sklearn.ensemble import RandomForestRegressor
+    LIGHTGBM_AVAILABLE = False
 
 class HybridRecommendation:
     """混合推荐系统"""
@@ -161,8 +166,18 @@ class HybridRecommendation:
         X = np.array(X)
         y = np.array(y)
         
-        # 使用随机森林作为元模型
-        self.meta_model = RandomForestRegressor(n_estimators=100, random_state=42)
+        if LIGHTGBM_AVAILABLE:
+            self.meta_model = LGBMRegressor(
+                n_estimators=300,
+                learning_rate=0.05,
+                subsample=0.9,
+                colsample_bytree=0.9,
+                random_state=42,
+            )
+        else:
+            from sklearn.ensemble import RandomForestRegressor  # local import fallback
+            self.meta_model = RandomForestRegressor(n_estimators=100, random_state=42)
+
         self.meta_model.fit(X, y)
         
         self.logger.info("元学习模型训练完成")
