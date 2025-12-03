@@ -13,15 +13,15 @@ import mlflow
 import numpy as np
 import pandas as pd
 from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import roc_auc_score
+from sklearn.linear_model import LinearRegression, LogisticRegression
+from sklearn.metrics import roc_auc_score, r2_score
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler, normalize
 
 try:
-    from lightgbm import LGBMClassifier
+    from lightgbm import LGBMClassifier, LGBMRegressor
 
     LIGHTGBM_AVAILABLE = True
 except ImportError:  # pragma: no cover - fallback when lightgbm missing
@@ -310,7 +310,7 @@ def _prepare_ranking_dataset(
     dataset_stats: pd.DataFrame,
     labels: Optional[pd.DataFrame],
     slot_metrics: Optional[pd.DataFrame],
-) -> Tuple[pd.DataFrame, pd.DataFrame, pd.Series]:
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.Series, Optional[pd.Series], str]:
     if dataset_features.empty:
         return pd.DataFrame(), pd.DataFrame(), pd.Series(dtype=int)
 
@@ -372,71 +372,135 @@ def _prepare_ranking_dataset(
             merged[col] = 0.0
         features[col] = merged[col].replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
+    sample_weight: Optional[pd.Series]
+    task_type = "classification"
     if labels is not None and not labels.empty and "label" in labels.columns:
-        label_series = labels.set_index("dataset_id")["label"]
-        merged = merged.join(label_series, on="dataset_id")
+        label_frame = labels.set_index("dataset_id")
+        merged = merged.join(label_frame, on="dataset_id")
         merged["label"] = merged["label"].fillna(0).astype(int)
-        target = merged["label"]
+        merged["click_count"] = merged.get("click_count", 0.0).fillna(0.0)
+        merged["exposure_count"] = merged.get("exposure_count", 0.0).fillna(0.0)
+        merged["ctr_label"] = np.where(
+            merged["exposure_count"] > 0,
+            merged["click_count"] / merged["exposure_count"],
+            0.0,
+        )
+        target = merged["ctr_label"].astype(float)
+        sample_weight = merged["exposure_count"].clip(lower=1.0).astype(float)
+        task_type = "regression"
     else:
         target = (merged["interaction_count"] > 0).astype(int)
+        sample_weight = None
     meta = merged[["dataset_id"]].reset_index(drop=True)
 
-    return meta, features, target
+    return meta, features, target, sample_weight, task_type
 
 
-def _train_ranking_model(features: pd.DataFrame, target: pd.Series) -> Tuple[Pipeline | None, float]:
+def _train_ranking_model(
+    features: pd.DataFrame,
+    target: pd.Series,
+    sample_weight: Optional[pd.Series],
+    task_type: str,
+) -> Tuple[Pipeline | None, Dict[str, float]]:
     if features.empty or target.nunique() <= 1:
-        return None, 0.0
-    class_counts = target.value_counts()
-    if (class_counts < 2).any():
-        LOGGER.warning(
-            "Skipping ranking model training due to insufficient class samples (counts=%s)",
-            class_counts.to_dict(),
-        )
-        return None, 0.0
+        return None, {"name": "auc" if task_type == "classification" else "r2", "value": 0.0}
 
-    X_train, X_test, y_train, y_test = train_test_split(
-        features,
-        target,
+    stratify = target if task_type == "classification" else None
+    arrays = [features, target]
+    if sample_weight is not None:
+        arrays.append(sample_weight)
+
+    split_result = train_test_split(
+        *arrays,
         test_size=0.25,
         random_state=42,
-        stratify=target,
+        stratify=stratify,
     )
 
-    estimator: Pipeline
-    if LIGHTGBM_AVAILABLE:
-        estimator = Pipeline([
-            ("scaler", StandardScaler()),
-            ("clf", LGBMClassifier(
-                objective="binary",
-                n_estimators=300,
-                learning_rate=0.05,
-                max_depth=-1,
-                subsample=0.8,
-                colsample_bytree=0.8,
-                class_weight="balanced",
-            )),
-        ])
+    if sample_weight is not None:
+        X_train, X_test, y_train, y_test, w_train, w_test = split_result
     else:
-        estimator = Pipeline([
-            ("scaler", StandardScaler()),
-            ("clf", LogisticRegression(max_iter=500, class_weight="balanced")),
-        ])
+        X_train, X_test, y_train, y_test = split_result
+        w_train = w_test = None
 
-    estimator.fit(X_train, y_train)
-    y_proba = estimator.predict_proba(X_test)[:, 1]
-    auc = roc_auc_score(y_test, y_proba)
+    if task_type == "classification":
+        class_counts = target.value_counts()
+        if (class_counts < 2).any():
+            LOGGER.warning(
+                "Skipping ranking classification training; insufficient samples (counts=%s)",
+                class_counts.to_dict(),
+            )
+            return None, {"name": "auc", "value": 0.0}
+        final_step_name = "clf"
+        if LIGHTGBM_AVAILABLE:
+            estimator = Pipeline([
+                ("scaler", StandardScaler()),
+                ("clf", LGBMClassifier(
+                    objective="binary",
+                    n_estimators=300,
+                    learning_rate=0.05,
+                    max_depth=-1,
+                    subsample=0.8,
+                    colsample_bytree=0.8,
+                    class_weight="balanced",
+                )),
+            ])
+        else:
+            estimator = Pipeline([
+                ("scaler", StandardScaler()),
+                ("clf", LogisticRegression(max_iter=500, class_weight="balanced")),
+            ])
+    else:
+        final_step_name = "reg"
+        if LIGHTGBM_AVAILABLE:
+            estimator = Pipeline([
+                ("scaler", StandardScaler()),
+                ("reg", LGBMRegressor(
+                    objective="regression",
+                    n_estimators=400,
+                    learning_rate=0.03,
+                    max_depth=-1,
+                    subsample=0.85,
+                    colsample_bytree=0.85,
+                )),
+            ])
+        else:
+            estimator = Pipeline([
+                ("scaler", StandardScaler()),
+                ("reg", LinearRegression()),
+            ])
+
+    fit_params = {}
+    if w_train is not None:
+        fit_params[f"{final_step_name}__sample_weight"] = w_train
+    estimator.fit(X_train, y_train, **fit_params)
+
+    if task_type == "classification":
+        y_score = estimator.predict_proba(X_test)[:, 1]
+        metric_value = roc_auc_score(y_test, y_score)
+        metric_name = "auc"
+    else:
+        y_pred = estimator.predict(X_test)
+        metric_value = r2_score(y_test, y_pred)
+        metric_name = "r2"
 
     # Refit on full dataset for production use
-    estimator.fit(features, target)
-    return estimator, float(auc)
+    if sample_weight is not None:
+        fit_params_full = {f"{final_step_name}__sample_weight": sample_weight}
+    else:
+        fit_params_full = {}
+    estimator.fit(features, target, **fit_params_full)
+    return estimator, {"name": metric_name, "value": float(metric_value)}
 
 
 def _score_ranking_model(pipeline: Pipeline | None, features: pd.DataFrame) -> pd.Series:
     if pipeline is None or features.empty:
         return pd.Series(dtype=float)
-    proba = pipeline.predict_proba(features)[:, 1]
-    return pd.Series(proba, index=features.index, dtype=float)
+    if hasattr(pipeline, "predict_proba"):
+        scores = pipeline.predict_proba(features)[:, 1]
+    else:
+        scores = pipeline.predict(features)
+    return pd.Series(scores, index=features.index, dtype=float)
 
 
 def _log_to_mlflow(params: Dict[str, object], metrics: Dict[str, float], artifacts: List[Path]) -> Dict[str, str]:
@@ -485,13 +549,18 @@ def main() -> None:
     vector_recall = build_vector_recall(content_matrix, content_ids, VECTOR_RECALL_K)
     popular_items = build_popular_items(interactions)
 
-    ranking_meta, ranking_features, ranking_target = _prepare_ranking_dataset(
+    ranking_meta, ranking_features, ranking_target, ranking_weights, ranking_task = _prepare_ranking_dataset(
         dataset_features,
         dataset_stats,
         ranking_labels,
         slot_metrics,
     )
-    ranking_model, ranking_auc = _train_ranking_model(ranking_features, ranking_target)
+    ranking_model, ranking_metric = _train_ranking_model(
+        ranking_features,
+        ranking_target,
+        ranking_weights,
+        ranking_task,
+    )
     ranking_scores = _score_ranking_model(ranking_model, ranking_features)
 
     behavior_path = MODELS_DIR / "item_sim_behavior.pkl"
@@ -536,14 +605,16 @@ def main() -> None:
         "image_similarity_weight": content_meta.get("image_similarity_weight", 0.0),
         "ranking_labels_source": "matomo" if not ranking_labels.empty else "interactions",
         "ranking_samples": int(len(ranking_target)),
-        "ranking_positive_samples": int(ranking_target.sum()) if not ranking_target.empty else 0,
+        "ranking_positive_samples": int((ranking_target > 0).sum()) if not ranking_target.empty else 0,
+        "ranking_task_type": ranking_task,
     }
     metrics = {
         "behavior_item_count": float(len(behavior_model)),
         "content_item_count": float(len(content_model)),
         "popular_item_count": float(len(popular_items)),
         "vector_recall_avg_neighbors": float(np.mean([len(v) for v in vector_recall.values()]) if vector_recall else 0.0),
-        "ranking_auc": float(ranking_auc),
+        "ranking_metric_value": float(ranking_metric["value"]),
+        "ranking_metric_name": ranking_metric["name"],
         "ranking_positive_rate": float(ranking_target.mean()) if not ranking_target.empty else 0.0,
     }
     metrics.update({
