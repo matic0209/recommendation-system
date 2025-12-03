@@ -610,6 +610,7 @@ def main() -> None:
         "ranking_samples": int(len(ranking_target)),
         "ranking_positive_samples": int((ranking_target > 0).sum()) if not ranking_target.empty else 0,
         "ranking_task_type": ranking_task,
+        "ranking_metric_name": ranking_metric["name"],
     }
     metrics = {
         "behavior_item_count": float(len(behavior_model)),
@@ -617,7 +618,6 @@ def main() -> None:
         "popular_item_count": float(len(popular_items)),
         "vector_recall_avg_neighbors": float(np.mean([len(v) for v in vector_recall.values()]) if vector_recall else 0.0),
         "ranking_metric_value": float(ranking_metric["value"]),
-        "ranking_metric_name": ranking_metric["name"],
         "ranking_positive_rate": float(ranking_target.mean()) if not ranking_target.empty else 0.0,
     }
     metrics.update({
