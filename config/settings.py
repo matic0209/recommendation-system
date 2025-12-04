@@ -40,8 +40,12 @@ def _resolve_data_dir() -> Path:
     env_dir = os.getenv("DATA_DIR")
     if env_dir:
         path = Path(env_dir).expanduser()
-        path.mkdir(parents=True, exist_ok=True)
-        return path
+        if _ensure_writable_directory(path):
+            return path
+        LOGGER.warning(
+            "Configured DATA_DIR %s is not writable; falling back to defaults",
+            path,
+        )
 
     preferred = BASE_DIR / "data"
     if _ensure_writable_directory(preferred):
