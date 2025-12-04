@@ -1,17 +1,14 @@
-## 推荐链路优化 TODO
+## 推荐链路优化 TODO（下一阶段）
 
-1. **打通 request_id 标签闭环**  
-   - [x] 在 `pipeline.aggregate_matomo_events` 输出中新增 CTR/CVR 统计字段，按 `(dataset_id, pos)` 聚合；  
-   - [x] Weekly DAG 里使用这些曝光/点击数据生成 ranking labels，替换当前只看交互次数的方式。
+1. **SOTA 特征/模型升级**
+   - [ ] **丰富用户画像**：将 Feature V2 中的用户行业、公司、偏好标签、活跃度等特征纳入 `_prepare_ranking_dataset`，并确保线上也能实时更新。
+   - [ ] **多模/语义信号**：对 `dataset_features` 增加文本/图像 Embedding（可通过 `dataset_image_embeddings` 或外部模型），并在召回/排序中使用。
+   - [ ] **多目标训练**：在 `train_models` 中引入 CVR/GMV 相关标签（利用 Matomo 转化数据），考虑多任务或加权训练，提升商业指标。
+   - [ ] **实时/增量特征**：设计 Kafka/Flink（或 Redis stream）驱动的近实时特征更新方案，减少离线延迟。
 
-2. **强化特征工程与模型**  
-   - [x] 构建统一特征库：价格区间、行业、卖家信誉、文本嵌入、Matomo 行为率等；  
-   - [x] 将当前混合推荐的随机森林 meta model 替换为 GBDT（LightGBM/XGBoost），并补齐缺失值处理与冷启动策略。
+2. **召回与排序策略进化**
+   - [ ] **Embedding 召回**：实现双塔/Graph Embedding（Faiss/HNSW）召回模块，补充现有 CF/TF-IDF。
+   - [ ] **粗排/重排**：在 `recommendation_api` 中加入粗排或 rerank（如小型 Transformer），提升候选质量。
+   - [ ] **场景化模型**：按入口（detail/API/home）训练独立模型或在排序中引入场景特征，让不同业务场景定制化。
+   - [ ] **实验体系升级**：自动生成实验计划、显著性检测和灰度策略（如 Thompson Sampling），减少手工调参数。
 
-3. **上下文与实验能力**  
-   - [x] Matomo 记录已包含 variant/pos，API 层需要透传 request context（入口、设备），让模型能按场景调权；  
-   - [ ] 在推荐 API 和前端之间增加实验参数（自定义维度），配合 Airflow 报表评估各算法权重，形成自动化调权流程。
-
-4. **监控与验证**  
-   - [x] 为 `pipeline.aggregate_matomo_events` 补充单元测试，确保新维度变更时报警；  
-   - [x] Airflow DAG 成功后自动抽样校验 `data/processed` 文件行数，避免出现 0 行仍继续训练。
