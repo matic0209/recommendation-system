@@ -46,7 +46,11 @@ def _load_experiments_config(path: Path) -> Dict:
 
 def _save_experiments_config(path: Path, data: Dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(yaml.safe_dump(data, allow_unicode=True, sort_keys=False))
+    try:
+        path.write_text(yaml.safe_dump(data, allow_unicode=True, sort_keys=False))
+    except PermissionError as exc:
+        LOGGER.error("Cannot write experiment config %s: %s", path, exc)
+        raise
 
 
 def _compute_allocations(
@@ -139,7 +143,11 @@ def optimize_experiment_allocations(
         name = variant.get("name", "control")
         variant["allocation"] = round(allocations.get(name, 0.0), 6)
 
-    _save_experiments_config(config_path, config)
+    try:
+        _save_experiments_config(config_path, config)
+    except PermissionError:
+        LOGGER.warning("Skipping experiment config update due to permission issue.")
+        return {}
     LOGGER.info(
         "Updated experiment '%s' allocations: %s",
         experiment_name,
