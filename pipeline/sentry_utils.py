@@ -315,10 +315,32 @@ def track_database_issue(
     )
 
 
+def init_pipeline_sentry(step_name: str, service_name: str = "pipeline") -> bool:
+    """Initialize Sentry for a CLI pipeline step."""
+    try:
+        from app.sentry_config import init_sentry
+    except ImportError as exc:  # pragma: no cover - only in restricted envs
+        LOGGER.warning("app.sentry_config not available, Sentry disabled: %s", exc)
+        return False
+
+    try:
+        enabled = init_sentry(service_name=f"{service_name}-{step_name}")
+        if enabled:
+            import sentry_sdk
+
+            sentry_sdk.set_tag("pipeline_step", step_name)
+            LOGGER.info("Sentry initialized for pipeline step %s", step_name)
+        return enabled
+    except Exception as exc:
+        LOGGER.warning("Failed to initialize Sentry for %s: %s", step_name, exc)
+        return False
+
+
 __all__ = [
     "monitor_pipeline_step",
     "track_data_quality_issue",
     "track_model_training_issue",
     "track_feature_store_sync_issue",
     "track_database_issue",
+    "init_pipeline_sentry",
 ]

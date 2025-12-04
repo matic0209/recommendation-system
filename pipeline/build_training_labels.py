@@ -8,6 +8,7 @@ from typing import Tuple
 import pandas as pd
 
 from config.settings import DATA_DIR
+from pipeline.sentry_utils import init_pipeline_sentry, monitor_pipeline_step
 
 LOGGER = logging.getLogger(__name__)
 PROCESSED_DIR = DATA_DIR / "processed"
@@ -67,6 +68,7 @@ def _prepare_clicks() -> pd.DataFrame:
     return clicks
 
 
+@monitor_pipeline_step("build_training_labels", critical=True)
 def build_training_labels() -> None:
     exposures = _prepare_exposures()
     if exposures.empty:
@@ -121,6 +123,7 @@ def build_training_labels() -> None:
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    init_pipeline_sentry("build_training_labels")
     build_training_labels()
 
 

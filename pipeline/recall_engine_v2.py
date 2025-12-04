@@ -16,6 +16,7 @@ from sklearn.metrics.pairwise import cosine_similarity
 
 from config.settings import DATA_DIR, MODELS_DIR
 from pipeline.vector_recall_faiss import FAISS_LIBS_AVAILABLE, FaissVectorRecall
+from pipeline.sentry_utils import init_pipeline_sentry, monitor_pipeline_step
 
 LOGGER = logging.getLogger(__name__)
 PROCESSED_DIR = DATA_DIR / "processed"
@@ -718,9 +719,11 @@ class MultiChannelRecallEngine:
             LOGGER.info("Saved Faiss vector recall: %s", saved_files)
 
 
+@monitor_pipeline_step("recall_engine_v2", critical=False)
 def main() -> None:
     """Train and save multi-channel recall models."""
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    init_pipeline_sentry("recall_engine_v2")
 
     # Load data
     interactions = pd.read_parquet(PROCESSED_DIR / "interactions.parquet")

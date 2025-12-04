@@ -42,6 +42,7 @@ from config.settings import (
     MODEL_REGISTRY_PATH,
     MODELS_DIR,
 )
+from pipeline.sentry_utils import init_pipeline_sentry, monitor_pipeline_step
 
 LOGGER = logging.getLogger(__name__)
 PROCESSED_DIR = DATA_DIR / "processed"
@@ -527,8 +528,10 @@ def _log_to_mlflow(params: Dict[str, object], metrics: Dict[str, float], artifac
         }
 
 
+@monitor_pipeline_step("train_models", critical=True)
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    init_pipeline_sentry("train_models")
     _ensure_models_dir()
 
     interactions = _load_frame(PROCESSED_DIR / "interactions.parquet")

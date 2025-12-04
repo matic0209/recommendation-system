@@ -16,6 +16,7 @@ from config.settings import BASE_DIR, DATA_DIR, FEATURE_STORE_PATH, DATASET_IMAG
 from pipeline.data_cleaner import DataCleaner
 from pipeline.build_features_v2 import FeatureEngineV2
 from pipeline.feature_store_redis import RedisFeatureStore
+from pipeline.sentry_utils import init_pipeline_sentry, monitor_pipeline_step
 
 # Optional: Visual image features (requires sentence-transformers)
 try:
@@ -240,8 +241,10 @@ def _sync_feature_store(tables: Dict[str, pd.DataFrame]) -> Dict[str, int]:
     return counts
 
 
+@monitor_pipeline_step("build_features", critical=True)
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    init_pipeline_sentry("build_features")
     _ensure_output_dir(PROCESSED_DIR)
 
     business_dir = DATA_DIR / "business"

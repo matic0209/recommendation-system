@@ -11,6 +11,7 @@ import pandas as pd
 import yaml
 
 from config.settings import BASE_DIR, DATA_DIR
+from pipeline.sentry_utils import init_pipeline_sentry, monitor_pipeline_step
 
 LOGGER = logging.getLogger(__name__)
 PROCESSED_DIR = DATA_DIR / "processed"
@@ -157,8 +158,10 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+@monitor_pipeline_step("variant_optimizer", critical=False)
 def main() -> None:
     args = parse_args()
+    init_pipeline_sentry("variant_optimizer")
     logging.basicConfig(level=getattr(logging, args.log_level.upper(), logging.INFO), format="%(asctime)s %(levelname)s %(message)s")
     optimize_experiment_allocations(
         experiment_name=args.experiment,

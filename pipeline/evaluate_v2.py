@@ -14,6 +14,7 @@ import numpy as np
 import pandas as pd
 
 from config.settings import DATA_DIR, MODELS_DIR
+from pipeline.sentry_utils import init_pipeline_sentry, monitor_pipeline_step
 
 
 def _parse_dimension_list(raw_value: Optional[str], fallback: Optional[str] = None) -> List[int]:
@@ -702,8 +703,10 @@ def generate_tracking_report() -> Dict[str, object]:
     return metrics
 
 
+@monitor_pipeline_step("evaluate_v2", critical=False)
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    init_pipeline_sentry("evaluate_v2")
     generate_tracking_report()
 
 

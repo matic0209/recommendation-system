@@ -9,6 +9,7 @@ from typing import Dict, List, Tuple
 import pandas as pd
 
 from config.settings import DATA_DIR
+from pipeline.sentry_utils import init_pipeline_sentry, monitor_pipeline_step
 
 LOGGER = logging.getLogger(__name__)
 PROCESSED_DIR = DATA_DIR / "processed"
@@ -63,12 +64,14 @@ def verify_processed_files(group: str) -> Dict[str, int]:
     return _verify_files(FILE_GROUPS[group])
 
 
+@monitor_pipeline_step("verify_processed_files", critical=False)
 def main() -> None:
     parser = argparse.ArgumentParser(description="Verify processed parquet artifacts.")
     parser.add_argument("--group", choices=["matomo", "training", "all"], default="all")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    init_pipeline_sentry(f"verify_{args.group}_files")
     summary = verify_processed_files(args.group)
     LOGGER.info("Processed artifacts verified: %s", ", ".join(f"{k}={v}" for k, v in summary.items()))
 
