@@ -68,6 +68,19 @@ def _prepare_clicks() -> pd.DataFrame:
     return clicks
 
 
+def _prepare_conversions() -> pd.DataFrame:
+    conversions = _load_optional_parquet(
+        CONVERSIONS_PATH,
+        ("dataset_id", "revenue", "server_time"),
+    )
+    if conversions.empty:
+        return conversions
+    conversions = conversions.dropna(subset=["dataset_id"])
+    conversions["dataset_id"] = conversions["dataset_id"].astype(int)
+    conversions["revenue"] = pd.to_numeric(conversions.get("revenue", 0.0), errors="coerce").fillna(0.0)
+    return conversions
+
+
 @monitor_pipeline_step("build_training_labels", critical=True)
 def build_training_labels() -> None:
     exposures = _prepare_exposures()
@@ -101,6 +114,27 @@ def build_training_labels() -> None:
         dataset_labels["label"] = dataset_labels["label"].astype(int)
     else:
         dataset_labels = pd.DataFrame(columns=["dataset_id", "label", "click_count", "exposure_count"])
+
+    conversions = _prepare_conversions()
+    if not conversions.empty:
+        conversions_by_dataset = conversions.groupby("dataset_id").agg(
+            conversion_count=("dataset_id", "count"),
+            conversion_revenue=("revenue", "sum"),
+        ).reset_index()
+        conversions_by_dataset["conversion_count"] = conversions_by_dataset["conversion_count"].astype(int)
+        dataset_labels = dataset_labels.merge(conversions_by_dataset, on="dataset_id", how="left")
+    else:
+        dataset_labels["conversion_count"] = 0
+        dataset_labels["conversion_revenue"] = 0.0
+
+    for column in ["conversion_count", "conversion_revenue"]:
+        if column not in dataset_labels.columns:
+            dataset_labels[column] = 0
+    dataset_labels[["conversion_count", "conversion_revenue"]] = dataset_labels[["conversion_count", "conversion_revenue"]].fillna(0)
+    exposures_safe = dataset_labels["exposure_count"].replace({0: pd.NA}).astype(float)
+    dataset_labels["conversion_rate"] = (
+        dataset_labels["conversion_count"] / exposures_safe
+    ).fillna(0.0)
 
     dataset_labels.to_parquet(DATASET_LABELS_PATH, index=False)
     LOGGER.info(

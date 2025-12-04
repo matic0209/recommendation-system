@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import logging
 import pickle
+import os
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -43,6 +44,8 @@ from config.settings import (
     MODELS_DIR,
 )
 from pipeline.sentry_utils import init_pipeline_sentry, monitor_pipeline_step
+
+RANKING_CVR_WEIGHT = float(os.getenv("RANKING_CVR_WEIGHT", "0.5"))
 
 LOGGER = logging.getLogger(__name__)
 PROCESSED_DIR = DATA_DIR / "processed"
@@ -388,19 +391,33 @@ def _prepare_ranking_dataset(
             rename_mapping["click_count"] = "label_click_count"
         if "exposure_count" in label_frame.columns:
             rename_mapping["exposure_count"] = "label_exposure_count"
+        if "conversion_count" in label_frame.columns:
+            rename_mapping["conversion_count"] = "label_conversion_count"
+        if "conversion_revenue" in label_frame.columns:
+            rename_mapping["conversion_revenue"] = "label_conversion_revenue"
+        if "conversion_rate" in label_frame.columns:
+            rename_mapping["conversion_rate"] = "label_conversion_rate"
         if rename_mapping:
             label_frame = label_frame.rename(columns=rename_mapping)
         merged = merged.join(label_frame, on="dataset_id")
         merged["label"] = merged["label"].fillna(0).astype(int)
-        merged["click_count"] = merged.get("click_count", 0.0).fillna(0.0)
-        merged["exposure_count"] = merged.get("exposure_count", 0.0).fillna(0.0)
+        merged["label_click_count"] = merged.get("label_click_count", 0.0).fillna(0.0)
+        merged["label_exposure_count"] = merged.get("label_exposure_count", 0.0).fillna(0.0)
+        merged["label_conversion_count"] = merged.get("label_conversion_count", 0.0).fillna(0.0)
+        merged["label_conversion_rate"] = merged.get("label_conversion_rate", 0.0).fillna(0.0)
+        exposures_safe = merged["label_exposure_count"].replace({0: np.nan})
         merged["ctr_label"] = np.where(
-            merged["exposure_count"] > 0,
-            merged["click_count"] / merged["exposure_count"],
+            merged["label_exposure_count"] > 0,
+            merged["label_click_count"] / merged["label_exposure_count"],
             0.0,
         )
-        target = merged["ctr_label"].astype(float)
-        sample_weight = merged["exposure_count"].clip(lower=1.0).astype(float)
+        merged["cvr_label"] = np.where(
+            merged["label_exposure_count"] > 0,
+            merged["label_conversion_count"] / merged["label_exposure_count"],
+            0.0,
+        )
+        target = (merged["ctr_label"] + RANKING_CVR_WEIGHT * merged["cvr_label"]).astype(float)
+        sample_weight = merged["label_exposure_count"].clip(lower=1.0).astype(float)
         task_type = "regression"
     else:
         target = (merged["interaction_count"] > 0).astype(int)
