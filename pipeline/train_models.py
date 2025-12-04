@@ -352,6 +352,12 @@ def _prepare_ranking_dataset(
 
     slot_features = _aggregate_slot_metrics(slot_metrics if slot_metrics is not None else pd.DataFrame())
     if not slot_features.empty:
+        slot_features = slot_features.rename(
+            columns={
+                "exposure_count": "slot_total_exposures",
+                "click_count": "slot_total_clicks",
+            }
+        )
         merged = merged.merge(slot_features, on="dataset_id", how="left")
     slot_columns = [
         "slot_total_exposures",
