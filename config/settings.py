@@ -18,13 +18,19 @@ BASE_DIR: Path = Path(__file__).resolve().parents[1]
 
 def _ensure_writable_directory(path: Path) -> bool:
     """
-    Attempt to create the directory (including parents) and report writability.
+    Ensure the directory exists and the current process can create files in it.
 
     Returning False means the caller should try a different path.
     """
     try:
         path.mkdir(parents=True, exist_ok=True)
+        test_file = path / ".write_test"
+        with open(test_file, "w", encoding="utf-8") as handle:
+            handle.write("ok")
+        test_file.unlink(missing_ok=True)
     except PermissionError:
+        return False
+    except OSError:
         return False
     return os.access(path, os.W_OK)
 
