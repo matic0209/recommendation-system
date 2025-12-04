@@ -17,6 +17,7 @@ from pipeline.data_cleaner import DataCleaner
 from pipeline.build_features_v2 import FeatureEngineV2
 from pipeline.feature_store_redis import RedisFeatureStore
 from pipeline.sentry_utils import init_pipeline_sentry, monitor_pipeline_step
+from pipeline.sentry_utils import init_pipeline_sentry, monitor_pipeline_step
 
 # Optional: Visual image features (requires sentence-transformers)
 try:
@@ -35,6 +36,62 @@ FEATURE_STORE_TABLES: Dict[str, tuple[str, ...]] = {
     "user_profile": ("user_id",),
     "dataset_stats": ("dataset_id",),
 }
+
+
+def build_dataset_user_stats(
+    interactions: pd.DataFrame,
+    user_features: pd.DataFrame,
+) -> pd.DataFrame:
+    """Aggregate user features per dataset for richer ranking signals."""
+    if interactions.empty or user_features.empty:
+        return pd.DataFrame(columns=["dataset_id"])
+
+    user_columns = [
+        "is_consumption",
+        "is_active_user",
+        "is_power_user",
+        "recency_score",
+        "purchase_frequency",
+        "preferred_price_range",
+        "preferred_price_mean",
+        "tag_diversity",
+        "purchase_count",
+        "total_spent",
+        "avg_purchase_amount",
+    ]
+    available = ["user_id"] + [col for col in user_columns if col in user_features.columns]
+    merged = interactions.merge(
+        user_features[available],
+        on="user_id",
+        how="left",
+    )
+
+    agg_spec = {col: "mean" for col in available if col != "user_id"}
+    agg_spec["user_id"] = "nunique"
+    grouped = (
+        merged.groupby("dataset_id")
+        .agg(agg_spec)
+        .reset_index()
+        .rename(columns={"user_id": "user_unique_buyers"})
+    )
+
+    rename_map = {
+        "is_consumption": "user_consumption_ratio",
+        "is_active_user": "user_active_ratio",
+        "is_power_user": "user_power_ratio",
+        "recency_score": "user_recency_score_mean",
+        "purchase_frequency": "user_purchase_frequency_mean",
+        "preferred_price_range": "user_preferred_price_range_mean",
+        "preferred_price_mean": "user_preferred_price_mean",
+        "tag_diversity": "user_tag_diversity_mean",
+        "purchase_count": "user_purchase_count_mean",
+        "total_spent": "user_total_spent_mean",
+        "avg_purchase_amount": "user_avg_purchase_amount_mean",
+    }
+    grouped = grouped.rename(columns={col: rename_map.get(col, col) for col in grouped.columns})
+    numeric_cols = grouped.select_dtypes(include=[np.number]).columns
+    grouped[numeric_cols] = grouped[numeric_cols].fillna(0.0)
+    return grouped
 
 
 def _load_parquet(path: Path) -> pd.DataFrame:
@@ -242,8 +299,10 @@ def _sync_feature_store(tables: Dict[str, pd.DataFrame]) -> Dict[str, int]:
 
 
 @monitor_pipeline_step("build_features", critical=True)
+@monitor_pipeline_step("build_features", critical=True)
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    init_pipeline_sentry("build_features")
     init_pipeline_sentry("build_features")
     _ensure_output_dir(PROCESSED_DIR)
 
@@ -398,19 +457,32 @@ def main() -> None:
         len(dataset_features_v2.columns),
     )
 
-    # Matomo CTR/CVR 特征融合 (dataset_features_v3)
+    dataset_user_stats = build_dataset_user_stats(cleaned_interactions, user_features_v2)
+    if not dataset_user_stats.empty:
+        user_stats_path = PROCESSED_DIR / "dataset_user_stats.parquet"
+        dataset_user_stats.to_parquet(user_stats_path, index=False)
+        LOGGER.info("Saved dataset user stats to %s (rows=%d)", user_stats_path, len(dataset_user_stats))
+
+    dataset_features_v3 = pd.DataFrame()
+    # Matomo CTR/CVR 特征 + 用户画像 (dataset_features_v3)
     slot_metrics_path = PROCESSED_DIR / "ranking_slot_metrics.parquet"
-    if slot_metrics_path.exists() and not dataset_features_v2.empty:
+    if not dataset_features_v2.empty:
         try:
-            slot_metrics = pd.read_parquet(slot_metrics_path)
-            merged = dataset_features_v2.merge(slot_metrics, on="dataset_id", how="left")
+            merged = dataset_features_v2.copy()
+            if slot_metrics_path.exists():
+                slot_metrics = pd.read_parquet(slot_metrics_path)
+                merged = merged.merge(slot_metrics, on="dataset_id", how="left")
+            if not dataset_user_stats.empty:
+                merged = merged.merge(dataset_user_stats, on="dataset_id", how="left")
             numeric_cols = merged.select_dtypes(include=[np.number]).columns
             merged[numeric_cols] = merged[numeric_cols].fillna(0.0)
+            dataset_features_v3 = merged
             v3_path = PROCESSED_DIR / "dataset_features_v3.parquet"
-            merged.to_parquet(v3_path, index=False)
-            LOGGER.info("Saved dataset features v3 with Matomo signals to %s", v3_path)
+            dataset_features_v3.to_parquet(v3_path, index=False)
+            LOGGER.info("Saved dataset features v3 with user + Matomo signals to %s", v3_path)
         except Exception as exc:  # noqa: BLE001
             LOGGER.warning("Failed to build dataset_features_v3: %s", exc)
+            dataset_features_v3 = pd.DataFrame()
 
     redis_url = os.getenv("FEATURE_REDIS_URL") or os.getenv("REDIS_FEATURE_URL")
     if redis_url:
@@ -423,7 +495,8 @@ def main() -> None:
         try:
             redis_store = RedisFeatureStore(host=host, port=port, db=db, password=password)
             redis_store.sync_user_features(user_features_v2)
-            redis_store.sync_dataset_features(dataset_features_v2)
+            dataset_features_for_sync = dataset_features_v3 if not dataset_features_v3.empty else dataset_features_v2
+            redis_store.sync_dataset_features(dataset_features_for_sync)
             redis_store.sync_dataset_stats(cleaned_dataset_stats)
             redis_store.sync_user_history(cleaned_interactions)
             LOGGER.info(
