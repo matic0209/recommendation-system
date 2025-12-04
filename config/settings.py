@@ -1,6 +1,7 @@
 """Global configuration helpers for the recommendation project."""
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,8 +11,56 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+LOGGER = logging.getLogger(__name__)
+
 BASE_DIR: Path = Path(__file__).resolve().parents[1]
-DATA_DIR: Path = Path(os.getenv("DATA_DIR", BASE_DIR / "data"))
+
+
+def _ensure_writable_directory(path: Path) -> bool:
+    """
+    Attempt to create the directory (including parents) and report writability.
+
+    Returning False means the caller should try a different path.
+    """
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except PermissionError:
+        return False
+    return os.access(path, os.W_OK)
+
+
+def _resolve_data_dir() -> Path:
+    """
+    Resolve a writable data directory.
+
+    Prefer the explicit DATA_DIR environment variable. When it is not provided,
+    fall back to the repo-local data directory if it is writable; otherwise use
+    a cache directory under the current user's home.
+    """
+    env_dir = os.getenv("DATA_DIR")
+    if env_dir:
+        path = Path(env_dir).expanduser()
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    preferred = BASE_DIR / "data"
+    if _ensure_writable_directory(preferred):
+        return preferred
+
+    fallback = Path.home() / ".cache" / "recommend" / "data"
+    if _ensure_writable_directory(fallback):
+        LOGGER.warning(
+            "Default data directory %s is not writable; using fallback %s",
+            preferred,
+            fallback,
+        )
+        return fallback
+
+    LOGGER.error("Unable to create a writable data directory; defaulting to %s", preferred)
+    return preferred
+
+
+DATA_DIR: Path = _resolve_data_dir()
 MODELS_DIR: Path = Path(os.getenv("MODELS_DIR", BASE_DIR / "models"))
 FEATURE_STORE_PATH: Path = DATA_DIR / "feature_store.db"
 MLFLOW_DIR: Path = BASE_DIR / "mlruns"
