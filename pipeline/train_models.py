@@ -383,6 +383,13 @@ def _prepare_ranking_dataset(
     task_type = "classification"
     if labels is not None and not labels.empty and "label" in labels.columns:
         label_frame = labels.set_index("dataset_id")
+        rename_mapping = {}
+        if "click_count" in label_frame.columns:
+            rename_mapping["click_count"] = "label_click_count"
+        if "exposure_count" in label_frame.columns:
+            rename_mapping["exposure_count"] = "label_exposure_count"
+        if rename_mapping:
+            label_frame = label_frame.rename(columns=rename_mapping)
         merged = merged.join(label_frame, on="dataset_id")
         merged["label"] = merged["label"].fillna(0).astype(int)
         merged["click_count"] = merged.get("click_count", 0.0).fillna(0.0)
