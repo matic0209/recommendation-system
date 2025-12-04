@@ -91,7 +91,7 @@ with DAG(
     dag_id="recommendation_pipeline",
     description="推荐系统端到端数据与模型流水线",
     default_args=DEFAULT_ARGS,
-    schedule_interval="0 2 * * *",  # 每天凌晨 2 点执行
+    schedule_interval="0 18 * * *",  # 每天北京时间 2 点 => 18:00 UTC 前一日
     start_date=datetime(2024, 1, 1),
     catchup=False,
     tags=["recommendation", "mlops"],

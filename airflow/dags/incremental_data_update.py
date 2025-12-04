@@ -44,7 +44,7 @@ with DAG(
     dag_id="incremental_data_update",
     description="增量更新推荐系统数据和模型",
     default_args=DEFAULT_ARGS,
-    schedule_interval="0 * * * *",  # 每小时第 0 分钟执行
+    schedule_interval="0 18 * * *",  # 每天北京时间 2 点执行
     start_date=datetime(2024, 1, 1),
     catchup=False,
     max_active_runs=1,

@@ -7,7 +7,7 @@ from airflow.operators.bash import BashOperator
 
 with DAG(
     dag_id="daily_recommendation_report",
-    schedule_interval="0 6 * * *",  # every day at 06:00 UTC
+    schedule_interval="0 20 * * *",  # 每天北京时间 04:00 => 20:00 UTC 前一日
     start_date=pendulum.datetime(2025, 10, 1, tz="UTC"),
     catchup=True,
     max_active_runs=1,
