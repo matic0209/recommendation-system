@@ -20,7 +20,8 @@ DEFAULT_CONFIG = BASE_DIR / "config" / "experiments.yaml"
 
 def _load_variant_metrics(path: Path, endpoint: str | None) -> pd.DataFrame:
     if not path.exists():
-        raise FileNotFoundError(f"Variant metrics file not found: {path}")
+        LOGGER.warning("Variant metrics file not found: %s", path)
+        return pd.DataFrame()
     df = pd.read_parquet(path)
     if endpoint:
         df = df[df.get("endpoint") == endpoint]
@@ -112,6 +113,9 @@ def optimize_experiment_allocations(
     exploration: float,
 ) -> Dict[str, float]:
     metrics = _load_variant_metrics(metrics_path, endpoint)
+    if metrics.empty:
+        LOGGER.warning("No variant metrics available; skipping experiment optimization.")
+        return {}
     config = _load_experiments_config(config_path)
 
     experiment_spec = (config.get("experiments") or {}).get(experiment_name)

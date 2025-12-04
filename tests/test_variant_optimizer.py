@@ -49,3 +49,31 @@ def test_optimize_allocations(tmp_path: Path):
     saved = yaml.safe_load(config_path.read_text())
     saved_variants = saved["experiments"]["recommendation_detail"]["variants"]
     assert saved_variants[1]["allocation"] > saved_variants[0]["allocation"]
+
+
+def test_optimize_allocations_missing_metrics(tmp_path: Path):
+    config_path = tmp_path / "experiments.yaml"
+    config = {
+        "experiments": {
+            "recommendation_detail": {
+                "salt": "test",
+                "status": "active",
+                "variants": [
+                    {"name": "control", "allocation": 0.5, "parameters": {}},
+                    {"name": "test", "allocation": 0.5, "parameters": {}},
+                ],
+            }
+        }
+    }
+    config_path.write_text(yaml.safe_dump(config))
+
+    allocations = optimize_experiment_allocations(
+        experiment_name="recommendation_detail",
+        metrics_path=tmp_path / "missing.parquet",
+        config_path=config_path,
+        endpoint="recommend_detail",
+        min_exposures=10,
+        smoothing_prior=(1.0, 20.0),
+        exploration=0.1,
+    )
+    assert allocations == {}
