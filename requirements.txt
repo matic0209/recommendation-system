@@ -42,6 +42,6 @@ transformers>=4.35.0,<4.36.0  # Pin to version compatible with torch 2.1.2
 
 # Phase 3: Vector recall & ranking (optional components)
 # Install when USE_FAISS_RECALL=1 or ONNX export is required
-# faiss-cpu==1.7.4
+faiss-cpu==1.7.4
 lightgbm==4.1.0
 # skl2onnx==1.16.0
