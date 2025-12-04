@@ -185,6 +185,7 @@ services:
       SENTRY_ENVIRONMENT: ${SENTRY_ENVIRONMENT:-production}
       PYTHONPATH: /opt/recommend
       MLFLOW_TRACKING_URI: http://mlflow:5000
+      HF_ENDPOINT: ${HF_ENDPOINT:-https://hf-mirror.com}
       SENTENCE_TRANSFORMERS_HOME: /opt/recommend/cache/sentence-transformers
       HF_HOME: /opt/recommend/cache/huggingface
       TRANSFORMERS_CACHE: /opt/recommend/cache/huggingface/hub
@@ -197,8 +198,7 @@ services:
       - ./airflow/plugins:/opt/airflow/plugins
       - mlflow-data:/mlflow
       - /dianshu/backup/data/dianshu_data/jsons:/dianshu/backup/data/dianshu_data/jsons:ro
-      - /opt/recommend/cache/sentence-transformers:/opt/recommend/cache/sentence-transformers
-      - /opt/recommend/cache/huggingface:/opt/recommend/cache/huggingface
+      - ./cache:/opt/recommend/cache
     ports:
       - "${AIRFLOW_WEB_HOST_PORT:-8080}:8080"
     command: webserver
@@ -228,6 +228,7 @@ services:
       SENTRY_ENVIRONMENT: ${SENTRY_ENVIRONMENT:-production}
       PYTHONPATH: /opt/recommend
       MLFLOW_TRACKING_URI: http://mlflow:5000
+      HF_ENDPOINT: ${HF_ENDPOINT:-https://hf-mirror.com}
       SENTENCE_TRANSFORMERS_HOME: /opt/recommend/cache/sentence-transformers
       HF_HOME: /opt/recommend/cache/huggingface
       TRANSFORMERS_CACHE: /opt/recommend/cache/huggingface/hub
@@ -240,8 +241,7 @@ services:
       - ./airflow/logs:/opt/airflow/logs
       - ./airflow/plugins:/opt/airflow/plugins
       - /dianshu/backup/data/dianshu_data/jsons:/dianshu/backup/data/dianshu_data/jsons:ro
-      - /opt/recommend/cache/sentence-transformers:/opt/recommend/cache/sentence-transformers
-      - /opt/recommend/cache/huggingface:/opt/recommend/cache/huggingface
+      - ./cache:/opt/recommend/cache
     command: scheduler
     extra_hosts:
       - "host.docker.internal:host-gateway"
