@@ -22,7 +22,7 @@ FILE_GROUPS: Dict[str, List[Tuple[str, Tuple[str, ...]]]] = {
         ("recommend_variant_metrics.parquet", ("dataset_id", "variant", "exposure_count")),
     ],
     "training": [
-        ("ranking_slot_metrics.parquet", ("dataset_id", "slot_total_exposures")),
+        ("ranking_slot_metrics.parquet", ("dataset_id", "position", "exposure_count")),
     ],
 }
 
