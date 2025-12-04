@@ -51,7 +51,7 @@ with DAG(
     dag_id="weekly_model_refresh",
     description="Weekly refresh of recommendation models using Matomo request-id data",
     default_args=DEFAULT_ARGS,
-    schedule_interval="0 3 * * 1",  # Every Monday 03:00 UTC
+    schedule_interval="0 12 * * 6",  # Saturday 20:00 Beijing = 12:00 UTC
     start_date=datetime(2024, 1, 1),
     catchup=False,
     max_active_runs=1,
