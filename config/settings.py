@@ -11,8 +11,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 BASE_DIR: Path = Path(__file__).resolve().parents[1]
-DATA_DIR: Path = BASE_DIR / "data"
-MODELS_DIR: Path = BASE_DIR / "models"
+DATA_DIR: Path = Path(os.getenv("DATA_DIR", BASE_DIR / "data"))
+MODELS_DIR: Path = Path(os.getenv("MODELS_DIR", BASE_DIR / "models"))
 FEATURE_STORE_PATH: Path = DATA_DIR / "feature_store.db"
 MLFLOW_DIR: Path = BASE_DIR / "mlruns"
 _env_tracking_uri = os.getenv("MLFLOW_TRACKING_URI")
