@@ -32,13 +32,13 @@ python-json-logger==2.0.7
 # Phase 2: Data quality and feature engineering
 scipy==1.10.1
 
-# Multimodal feature extraction (install separately to avoid huge base image)
-# Pillow==10.2.0
-# torch==2.1.2
-# torchvision==0.16.2
-# huggingface-hub>=0.15.1
-# sentence-transformers==2.3.1
-# transformers>=4.35.0,<4.36.0  # Pin to version compatible with torch 2.1.2
+# Multimodal feature extraction (CPU friendly)
+Pillow==10.2.0
+torch==2.1.2
+torchvision==0.16.2
+huggingface-hub>=0.15.1
+sentence-transformers==2.3.1
+transformers>=4.35.0,<4.36.0  # Pin to version compatible with torch 2.1.2
 
 # Phase 3: Vector recall & ranking (optional components)
 # Install when USE_FAISS_RECALL=1 or ONNX export is required
