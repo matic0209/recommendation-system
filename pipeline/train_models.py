@@ -401,10 +401,10 @@ def _prepare_ranking_dataset(
             label_frame = label_frame.rename(columns=rename_mapping)
         merged = merged.join(label_frame, on="dataset_id")
         merged["label"] = merged["label"].fillna(0).astype(int)
-        merged["label_click_count"] = merged.get("label_click_count", 0.0).fillna(0.0)
-        merged["label_exposure_count"] = merged.get("label_exposure_count", 0.0).fillna(0.0)
-        merged["label_conversion_count"] = merged.get("label_conversion_count", 0.0).fillna(0.0)
-        merged["label_conversion_rate"] = merged.get("label_conversion_rate", 0.0).fillna(0.0)
+        for column in ["label_click_count", "label_exposure_count", "label_conversion_count", "label_conversion_rate"]:
+            merged[column] = merged.get(column, 0.0)
+            if hasattr(merged[column], "fillna"):
+                merged[column] = merged[column].fillna(0.0)
         exposures_safe = merged["label_exposure_count"].replace({0: np.nan})
         merged["ctr_label"] = np.where(
             merged["label_exposure_count"] > 0,
