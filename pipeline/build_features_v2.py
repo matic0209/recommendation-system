@@ -223,6 +223,7 @@ class FeatureEngineV2:
         interactions: pd.DataFrame,
         dataset_image: pd.DataFrame | None = None,
         image_embeddings: pd.DataFrame | None = None,
+        text_embeddings: pd.DataFrame | None = None,
     ) -> pd.DataFrame:
         """
         Build enhanced dataset features (30+ features including image features).
@@ -270,6 +271,17 @@ class FeatureEngineV2:
             features = features.merge(image_embeddings, on="dataset_id", how="left")
         else:
             LOGGER.warning("No visual embeddings available; downstream models will rely on text-only signals")
+
+        if text_embeddings is not None and not text_embeddings.empty:
+            text_dims = len([c for c in text_embeddings.columns if c.startswith("text_embed_")])
+            LOGGER.info(
+                "Merging text embeddings (%d datasets, %d dims)...",
+                len(text_embeddings),
+                text_dims,
+            )
+            features = features.merge(text_embeddings, on="dataset_id", how="left")
+        else:
+            LOGGER.warning("No text embeddings available; consider running pipeline.text_embeddings before build_features.")
 
         # === Text Features (5) ===
         features["description_length"] = (

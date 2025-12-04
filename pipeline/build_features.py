@@ -436,12 +436,21 @@ def main() -> None:
         cleaned_user_profile,
         cleaned_dataset,
     )
+    dataset_text_embeddings = None
+    text_embeddings_path = PROCESSED_DIR / "dataset_text_embeddings.parquet"
+    if text_embeddings_path.exists():
+        dataset_text_embeddings = pd.read_parquet(text_embeddings_path)
+        LOGGER.info("Loaded dataset text embeddings from %s", text_embeddings_path)
+    else:
+        LOGGER.warning("Text embeddings not found at %s; proceeding without", text_embeddings_path)
+
     dataset_features_v2 = engine.build_dataset_features_v2(
         cleaned_dataset,
         cleaned_dataset_stats,
         cleaned_interactions,
         dataset_image,
         image_embeddings,
+        dataset_text_embeddings,
     )
 
     engine.save_features(
