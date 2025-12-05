@@ -892,7 +892,11 @@ def _augment_with_multi_channel(
 
     # Price bucket recall
     price_bucket_index = recall.get("price_bucket_index", {})
-    price = state.metadata.get(target_id, {}).get("price", 0.0)
+    raw_price = state.metadata.get(target_id, {}).get("price", 0.0)
+    try:
+        price = float(raw_price)
+    except (TypeError, ValueError):
+        price = 0.0
     if price_bucket_index:
         if price < 100:
             bucket = "0"
