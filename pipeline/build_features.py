@@ -17,7 +17,7 @@ from pipeline.data_cleaner import DataCleaner
 from pipeline.build_features_v2 import FeatureEngineV2
 from pipeline.feature_store_redis import RedisFeatureStore
 from pipeline.sentry_utils import init_pipeline_sentry, monitor_pipeline_step
-from pipeline.sentry_utils import init_pipeline_sentry, monitor_pipeline_step
+from pipeline.memory_optimizer import optimize_dataframe_memory, reduce_memory_usage
 
 # Optional: Visual image features (requires sentence-transformers)
 try:
@@ -299,12 +299,14 @@ def _sync_feature_store(tables: Dict[str, pd.DataFrame]) -> Dict[str, int]:
 
 
 @monitor_pipeline_step("build_features", critical=True)
-@monitor_pipeline_step("build_features", critical=True)
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     init_pipeline_sentry("build_features")
-    init_pipeline_sentry("build_features")
     _ensure_output_dir(PROCESSED_DIR)
+
+    LOGGER.info("=" * 80)
+    LOGGER.info("MEMORY-OPTIMIZED FEATURE BUILDING")
+    LOGGER.info("=" * 80)
 
     business_dir = DATA_DIR / "business"
 
@@ -316,8 +318,14 @@ def main() -> None:
     else:
         interaction_inputs["order_tab"] = legacy_order_parquet
 
+    LOGGER.info("Building interactions...")
     interactions = build_interactions(interaction_inputs)
+    interactions = optimize_dataframe_memory(interactions)
+    reduce_memory_usage()
+
+    LOGGER.info("Building dataset features...")
     dataset_features = build_dataset_features(business_dir / "dataset.parquet")
+    dataset_features = optimize_dataframe_memory(dataset_features)
 
     active_dataset_ids = set(dataset_features["dataset_id"].dropna().astype(int)) if not dataset_features.empty else set()
     if active_dataset_ids:
@@ -335,15 +343,21 @@ def main() -> None:
     dataset_features.to_parquet(dataset_path, index=False)
     LOGGER.info("Saved dataset features to %s", dataset_path)
 
+    LOGGER.info("Building user profile...")
     user_profile = build_user_profile(business_dir / "user.parquet")
+    user_profile = optimize_dataframe_memory(user_profile)
     user_path = PROCESSED_DIR / "user_profile.parquet"
     user_profile.to_parquet(user_path, index=False)
     LOGGER.info("Saved user profile to %s", user_path)
+    reduce_memory_usage()
 
+    LOGGER.info("Building dataset stats...")
     dataset_stats = build_dataset_stats(interactions)
+    dataset_stats = optimize_dataframe_memory(dataset_stats)
     stats_path = PROCESSED_DIR / "dataset_stats.parquet"
     dataset_stats.to_parquet(stats_path, index=False)
     LOGGER.info("Saved dataset stats to %s", stats_path)
+    reduce_memory_usage()
 
     sync_counts = _sync_feature_store(
         {

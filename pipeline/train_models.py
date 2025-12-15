@@ -44,6 +44,11 @@ from config.settings import (
     MODELS_DIR,
 )
 from pipeline.sentry_utils import init_pipeline_sentry, monitor_pipeline_step
+from pipeline.memory_optimizer import (
+    optimize_dataframe_memory,
+    build_sparse_similarity_matrix,
+    reduce_memory_usage,
+)
 
 RANKING_CVR_WEIGHT = float(os.getenv("RANKING_CVR_WEIGHT", "0.5"))
 
@@ -105,6 +110,10 @@ def train_behavior_similarity(interactions: pd.DataFrame) -> Dict[int, Dict[int,
 def train_content_similarity(
     dataset_features: pd.DataFrame,
 ) -> Tuple[Dict[int, Dict[int, float]], np.ndarray, List[int], Dict[str, float]]:
+    """Train content-based similarity with memory optimization.
+
+    OPTIMIZED: Uses batch processing to avoid creating full N x N similarity matrix in memory.
+    """
     if dataset_features.empty:
         return {}, np.empty((0, 0)), [], {"modalities": 0.0, "image_embedding_dim": 0.0, "image_similarity_weight": 0.0}
 
@@ -117,54 +126,78 @@ def train_content_similarity(
         + features.get("tag", "").fillna("")
     )
 
+    # Extract item IDs before processing
+    item_ids = features["dataset_id"].tolist()
+
+    # Build TF-IDF matrix (sparse, memory efficient)
     vectorizer = TfidfVectorizer(max_features=5000)
     text_matrix = vectorizer.fit_transform(features["text"])
-    text_similarity = cosine_similarity(text_matrix)
 
+    LOGGER.info("TF-IDF matrix shape: %s (sparse)", text_matrix.shape)
+
+    # Check for image embeddings
     embedding_cols = [col for col in features.columns if col.startswith("image_embed_mean_")]
-    similarity_matrix = text_similarity
-    modalities = 1
-    embedding_dim = 0
+    image_vectors = None
 
     if embedding_cols:
         image_vectors = features[embedding_cols].fillna(0.0).to_numpy(dtype=np.float32)
-        if image_vectors.size and image_vectors.shape[0] == text_similarity.shape[0]:
-            image_vectors = normalize(image_vectors)
-            image_similarity = cosine_similarity(image_vectors)
-            similarity_matrix = (
-                (1 - IMAGE_SIMILARITY_WEIGHT) * text_similarity +
-                IMAGE_SIMILARITY_WEIGHT * image_similarity
-            )
-            modalities = 2
-            embedding_dim = image_vectors.shape[1]
-            LOGGER.info(
-                "Combined text and image similarities (image_weight=%s, embedding_dim=%d)",
-                IMAGE_SIMILARITY_WEIGHT,
-                image_vectors.shape[1],
-            )
+        if image_vectors.size and image_vectors.shape[0] == text_matrix.shape[0]:
+            LOGGER.info("Using multimodal similarity (text + image, dim=%d)", image_vectors.shape[1])
         else:
             LOGGER.warning(
-                "Image embeddings present but shape mismatch (vectors=%s); using text-only similarity",
+                "Image embeddings shape mismatch (vectors=%s, expected=%d); using text-only",
                 image_vectors.shape if image_vectors.size else 0,
+                text_matrix.shape[0],
             )
+            image_vectors = None
 
-    item_ids = features["dataset_id"].tolist()
+    # Use memory-efficient batch processing
+    batch_size = int(os.getenv("SIMILARITY_BATCH_SIZE", "1000"))
+    top_k = int(os.getenv("SIMILARITY_TOP_K", "200"))
+
+    similarity_by_idx, meta = build_sparse_similarity_matrix(
+        text_matrix,
+        image_vectors=image_vectors,
+        image_weight=IMAGE_SIMILARITY_WEIGHT,
+        batch_size=batch_size,
+        top_k=top_k,
+    )
+
+    # Convert index-based dict to item_id-based dict
     similarity: Dict[int, Dict[int, float]] = {}
-    for idx, item_id in enumerate(item_ids):
-        scores = {}
-        row = similarity_matrix[idx]
-        for jdx, other_id in enumerate(item_ids):
-            if item_id == other_id:
-                continue
-            score = float(row[jdx])
-            if score > 0:
-                scores[other_id] = score
-        similarity[item_id] = scores
-    meta = {
-        "modalities": float(modalities),
-        "image_embedding_dim": float(embedding_dim),
-        "image_similarity_weight": float(IMAGE_SIMILARITY_WEIGHT if modalities > 1 else 0.0),
-    }
+    for idx, neighbors in similarity_by_idx.items():
+        item_id = item_ids[idx]
+        similarity[item_id] = {
+            item_ids[neighbor_idx]: score
+            for neighbor_idx, score in neighbors.items()
+        }
+
+    # Build a lightweight similarity matrix for vector recall (top K only)
+    # Instead of full N x N, we only store top K neighbors
+    n_items = len(item_ids)
+    similarity_matrix = np.zeros((n_items, top_k), dtype=np.float32)
+
+    for idx in range(n_items):
+        if idx in similarity_by_idx:
+            neighbors = similarity_by_idx[idx]
+            # Sort by score and take top K
+            sorted_neighbors = sorted(neighbors.items(), key=lambda x: x[1], reverse=True)[:top_k]
+            for rank, (_, score) in enumerate(sorted_neighbors):
+                if rank < top_k:
+                    similarity_matrix[idx, rank] = score
+
+    LOGGER.info(
+        "Content similarity computed: %d items, avg %.1f neighbors per item",
+        len(similarity),
+        np.mean([len(v) for v in similarity.values()]) if similarity else 0,
+    )
+
+    # Free memory
+    del text_matrix, features, similarity_by_idx
+    if image_vectors is not None:
+        del image_vectors
+    reduce_memory_usage()
+
     return similarity, similarity_matrix, item_ids, meta
 
 
@@ -558,31 +591,65 @@ def main() -> None:
     init_pipeline_sentry("train_models")
     _ensure_models_dir()
 
+    LOGGER.info("=" * 80)
+    LOGGER.info("MEMORY-OPTIMIZED MODEL TRAINING")
+    LOGGER.info("=" * 80)
+
+    # Load data with memory optimization
     interactions = _load_frame(PROCESSED_DIR / "interactions.parquet")
     dataset_features = _load_frame(PROCESSED_DIR / "dataset_features.parquet")
     dataset_stats = _load_frame(PROCESSED_DIR / "dataset_stats.parquet")
     ranking_labels = _load_ranking_labels()
     slot_metrics = _load_frame(PROCESSED_DIR / "ranking_slot_metrics.parquet")
 
+    # Optimize memory usage for loaded DataFrames
+    LOGGER.info("Optimizing DataFrame memory usage...")
+    if not interactions.empty:
+        interactions = optimize_dataframe_memory(interactions)
+    if not dataset_features.empty:
+        dataset_features = optimize_dataframe_memory(dataset_features)
+    if not dataset_stats.empty:
+        dataset_stats = optimize_dataframe_memory(dataset_stats)
+
     # Prefer enhanced feature views when available
     dataset_features_v3 = _load_frame(PROCESSED_DIR / "dataset_features_v3.parquet")
     interactions_v2 = _load_frame(PROCESSED_DIR / "interactions_v2.parquet")
     if not interactions_v2.empty:
-        interactions = interactions_v2
+        interactions = optimize_dataframe_memory(interactions_v2)
+        del interactions_v2
 
     dataset_features_v2 = _load_frame(PROCESSED_DIR / "dataset_features_v2.parquet")
     if not dataset_features_v2.empty:
-        dataset_features = dataset_features_v2
+        dataset_features = optimize_dataframe_memory(dataset_features_v2)
+        del dataset_features_v2
     if not dataset_features_v3.empty:
-        dataset_features = dataset_features_v3
+        dataset_features = optimize_dataframe_memory(dataset_features_v3)
+        del dataset_features_v3
 
     dataset_stats_v2 = _load_frame(PROCESSED_DIR / "dataset_stats_v2.parquet")
     if not dataset_stats_v2.empty:
-        dataset_stats = dataset_stats_v2
+        dataset_stats = optimize_dataframe_memory(dataset_stats_v2)
+        del dataset_stats_v2
 
+    reduce_memory_usage()
+
+    # Train models with memory monitoring
+    LOGGER.info("Training behavior similarity model...")
     behavior_model = train_behavior_similarity(interactions)
+    reduce_memory_usage()
+
+    LOGGER.info("Training content similarity model (memory-optimized)...")
     content_model, content_matrix, content_ids, content_meta = train_content_similarity(dataset_features)
+    reduce_memory_usage()
+
+    LOGGER.info("Building vector recall index...")
     vector_recall = build_vector_recall(content_matrix, content_ids, VECTOR_RECALL_K)
+
+    # Free large matrices that are no longer needed
+    del content_matrix
+    reduce_memory_usage()
+
+    LOGGER.info("Building popular items list...")
     popular_items = build_popular_items(interactions)
 
     ranking_meta, ranking_features, ranking_target, ranking_weights, ranking_task = _prepare_ranking_dataset(
