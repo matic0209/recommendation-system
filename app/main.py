@@ -611,6 +611,80 @@ def _load_feature_versions() -> Dict[str, str]:
     return versions
 
 
+def _load_slot_metrics() -> pd.DataFrame:
+    """Load and aggregate slot metrics for ranking features.
+
+    This mirrors the _aggregate_slot_metrics function from train_models.py
+    to ensure consistency between training and inference.
+    """
+    slot_metrics_path = DATA_DIR / "processed" / "recommend_slot_metrics.parquet"
+    if not slot_metrics_path.exists():
+        LOGGER.warning("Slot metrics file missing: %s. Ranking will use zero features.", slot_metrics_path)
+        return pd.DataFrame()
+
+    try:
+        metrics = pd.read_parquet(slot_metrics_path)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.error("Failed to load slot metrics: %s", exc)
+        return pd.DataFrame()
+
+    if metrics.empty:
+        return pd.DataFrame()
+
+    # Ensure required columns exist
+    required_cols = ["dataset_id", "position", "exposure_count", "ctr", "cvr"]
+    for col in required_cols:
+        if col not in metrics.columns:
+            LOGGER.warning("Missing column %s in slot metrics", col)
+            return pd.DataFrame()
+
+    metrics["dataset_id"] = metrics["dataset_id"].astype(int)
+    metrics["position"] = metrics["position"].astype(int)
+
+    # Aggregate across positions (same logic as train_models._aggregate_slot_metrics)
+    grouped = (
+        metrics.groupby("dataset_id")
+        .agg(
+            slot_total_exposures=("exposure_count", "sum"),
+            slot_total_clicks=("click_count", "sum") if "click_count" in metrics.columns else ("exposure_count", lambda x: 0),
+            slot_total_conversions=("conversion_count", "sum") if "conversion_count" in metrics.columns else ("exposure_count", lambda x: 0),
+            slot_total_revenue=("conversion_revenue", "sum") if "conversion_revenue" in metrics.columns else ("exposure_count", lambda x: 0),
+            slot_mean_ctr=("ctr", "mean"),
+            slot_max_ctr=("ctr", "max"),
+            slot_mean_cvr=("cvr", "mean"),
+            slot_position_coverage=("position", "nunique"),
+        )
+        .reset_index()
+    )
+
+    # Get top position stats
+    top1 = metrics[metrics["position"] == 1].groupby("dataset_id").agg(
+        slot_ctr_top1=("ctr", "mean"),
+        slot_cvr_top1=("cvr", "mean"),
+    )
+    top3 = metrics[metrics["position"] <= 3].groupby("dataset_id").agg(
+        slot_ctr_top3=("ctr", "mean"),
+        slot_cvr_top3=("cvr", "mean"),
+    )
+
+    # Merge all stats
+    merged = grouped.merge(top1, on="dataset_id", how="left").merge(top3, on="dataset_id", how="left")
+
+    # Fill missing values
+    for col in [
+        "slot_ctr_top1", "slot_cvr_top1", "slot_ctr_top3", "slot_cvr_top3",
+        "slot_total_exposures", "slot_total_clicks", "slot_total_conversions",
+        "slot_total_revenue", "slot_mean_ctr", "slot_max_ctr", "slot_mean_cvr",
+        "slot_position_coverage",
+    ]:
+        if col not in merged.columns:
+            merged[col] = 0.0
+        merged[col] = merged[col].fillna(0.0)
+
+    LOGGER.info("Loaded slot metrics for %d datasets", len(merged))
+    return merged
+
+
 def _compute_feature_snapshot_id(versions: Dict[str, str]) -> Optional[str]:
     if not versions:
         return None
@@ -1049,6 +1123,7 @@ def _compute_ranking_features(
     dataset_ids: List[int],
     raw_features: pd.DataFrame,
     dataset_stats: pd.DataFrame,
+    slot_metrics_aggregated: pd.DataFrame,
 ) -> pd.DataFrame:
     if not dataset_ids:
         return pd.DataFrame()
@@ -1092,8 +1167,7 @@ def _compute_ranking_features(
         else:
             features[col] = 0.0
 
-    # Add slot metrics features (used during training)
-    # These are computed from exposure logs during training, but we fill with 0 during inference
+    # Add slot metrics features from aggregated data
     slot_columns = [
         "slot_total_exposures",
         "slot_total_clicks",
@@ -1108,8 +1182,19 @@ def _compute_ranking_features(
         "slot_cvr_top1",
         "slot_cvr_top3",
     ]
-    for col in slot_columns:
-        features[col] = 0.0
+
+    # Merge slot metrics if available
+    if not slot_metrics_aggregated.empty:
+        slot_data = slot_metrics_aggregated.set_index("dataset_id").reindex(dataset_ids)
+        for col in slot_columns:
+            if col in slot_data.columns:
+                features[col] = pd.to_numeric(slot_data[col], errors="coerce").fillna(0.0)
+            else:
+                features[col] = 0.0
+    else:
+        # Fall back to zeros if no slot metrics available
+        for col in slot_columns:
+            features[col] = 0.0
 
     return features
 
@@ -1144,12 +1229,13 @@ def _apply_ranking(
     rank_model: Optional[Pipeline],
     raw_features: pd.DataFrame,
     dataset_stats: pd.DataFrame,
+    slot_metrics_aggregated: pd.DataFrame,
 ) -> None:
     if rank_model is None or not scores:
         return
 
     dataset_ids = list(scores.keys())
-    features = _compute_ranking_features(dataset_ids, raw_features, dataset_stats)
+    features = _compute_ranking_features(dataset_ids, raw_features, dataset_stats, slot_metrics_aggregated)
     if features.empty:
         return
 
@@ -1291,6 +1377,7 @@ def load_models() -> None:
         feature_store=feature_store,
         dataset_ids=dataset_ids,
     )
+    slot_metrics_aggregated = _load_slot_metrics()
     feature_versions = _load_feature_versions()
     feature_snapshot_id = _compute_feature_snapshot_id(feature_versions)
     user_history = _load_user_history()
@@ -1304,6 +1391,7 @@ def load_models() -> None:
     app.state.raw_features = raw_features
     app.state.dataset_tags = dataset_tags
     app.state.dataset_stats = dataset_stats
+    app.state.slot_metrics_aggregated = slot_metrics_aggregated
     app.state.user_history = user_history
     app.state.user_profiles = user_profiles
     app.state.user_tag_preferences = user_tag_preferences
@@ -1584,6 +1672,7 @@ async def get_similar(
                 local_bundle.rank_model,
                 state.raw_features,
                 state.dataset_stats,
+                state.slot_metrics_aggregated,
                 endpoint=endpoint,
                 operation="model_inference",
                 timeout=TimeoutManager.get_timeout("model_inference"),
@@ -1829,6 +1918,7 @@ async def recommend_for_detail(
                 local_bundle.rank_model,
                 state.raw_features,
                 state.dataset_stats,
+                state.slot_metrics_aggregated,
                 endpoint=endpoint,
                 operation="model_inference",
                 timeout=TimeoutManager.get_timeout("model_inference"),
