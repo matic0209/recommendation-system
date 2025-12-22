@@ -5,7 +5,7 @@ that previously caused OOM errors.
 """
 import gc
 import logging
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -63,7 +63,7 @@ def optimize_dataframe_memory(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def compute_similarity_in_batches(
-    matrix: csr_matrix | np.ndarray,
+    matrix,  # type: Union[csr_matrix, np.ndarray]
     batch_size: int = 1000,
     top_k: int = 200,
     min_score: float = 0.01,
@@ -155,7 +155,7 @@ def compute_similarity_in_batches(
 
 def build_sparse_similarity_matrix(
     text_matrix: csr_matrix,
-    image_vectors: np.ndarray | None = None,
+    image_vectors = None,  # type: Union[np.ndarray, None]
     image_weight: float = 0.4,
     batch_size: int = 1000,
     top_k: int = 200,
