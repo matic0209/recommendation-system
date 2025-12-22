@@ -1091,6 +1091,26 @@ def _compute_ranking_features(
             features[col] = pd.to_numeric(selected[col], errors="coerce").fillna(0.0)
         else:
             features[col] = 0.0
+
+    # Add slot metrics features (used during training)
+    # These are computed from exposure logs during training, but we fill with 0 during inference
+    slot_columns = [
+        "slot_total_exposures",
+        "slot_total_clicks",
+        "slot_total_conversions",
+        "slot_total_revenue",
+        "slot_mean_ctr",
+        "slot_max_ctr",
+        "slot_mean_cvr",
+        "slot_position_coverage",
+        "slot_ctr_top1",
+        "slot_ctr_top3",
+        "slot_cvr_top1",
+        "slot_cvr_top3",
+    ]
+    for col in slot_columns:
+        features[col] = 0.0
+
     return features
 
 
