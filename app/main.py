@@ -1102,7 +1102,11 @@ def _apply_ranking_with_circuit_breaker(
     features: pd.DataFrame,
 ) -> None:
     """Apply ranking with circuit breaker protection."""
-    probabilities = rank_model.predict_proba(features)[:, 1]
+    # Support both classification (predict_proba) and regression (predict) models
+    if hasattr(rank_model, "predict_proba"):
+        probabilities = rank_model.predict_proba(features)[:, 1]
+    else:
+        probabilities = rank_model.predict(features)
 
     for dataset_id, prob in zip(features.index.astype(int), probabilities):
         if dataset_id not in scores:
