@@ -23,6 +23,7 @@ from sklearn.preprocessing import StandardScaler, normalize
 
 try:
     from lightgbm import LGBMClassifier, LGBMRegressor
+    from lightgbm import early_stopping
 
     LIGHTGBM_AVAILABLE = True
 except ImportError:  # pragma: no cover - fallback when lightgbm missing
@@ -81,6 +82,80 @@ def _load_ranking_labels() -> pd.DataFrame:
 
 def _ensure_models_dir() -> None:
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _build_user_profiles(interactions: pd.DataFrame, dataset_features: pd.DataFrame) -> pd.DataFrame:
+    """
+    Build comprehensive user profiles from interaction history.
+
+    Args:
+        interactions: User-item interactions
+        dataset_features: Dataset metadata
+
+    Returns:
+        DataFrame with user_id and profile features
+    """
+    if interactions.empty:
+        return pd.DataFrame(columns=["user_id"])
+
+    # Merge with dataset features to get item attributes
+    enriched = interactions.merge(
+        dataset_features[["dataset_id", "price", "tag"]].copy() if not dataset_features.empty else pd.DataFrame(),
+        on="dataset_id",
+        how="left"
+    )
+
+    # Compute user statistics
+    user_stats = enriched.groupby("user_id").agg(
+        user_interaction_count=("dataset_id", "count"),
+        user_unique_items=("dataset_id", "nunique"),
+        user_avg_weight=("weight", "mean"),
+        user_total_weight=("weight", "sum"),
+        user_avg_price=("price", lambda x: pd.to_numeric(x, errors="coerce").mean()),
+        user_min_price=("price", lambda x: pd.to_numeric(x, errors="coerce").min()),
+        user_max_price=("price", lambda x: pd.to_numeric(x, errors="coerce").max()),
+    ).reset_index()
+
+    # Add user activity recency
+    if "last_event_time" in enriched.columns:
+        user_stats["user_last_active"] = enriched.groupby("user_id")["last_event_time"].max().values
+        user_stats["user_first_active"] = enriched.groupby("user_id")["last_event_time"].min().values
+        user_stats["user_tenure_days"] = (
+            pd.to_datetime(user_stats["user_last_active"], errors="coerce") -
+            pd.to_datetime(user_stats["user_first_active"], errors="coerce")
+        ).dt.days.fillna(0)
+    else:
+        user_stats["user_tenure_days"] = 0.0
+
+    # Add user diversity (how many different items they interact with)
+    user_stats["user_diversity"] = user_stats["user_unique_items"] / user_stats["user_interaction_count"]
+
+    # Add price preference
+    user_stats["user_price_range"] = user_stats["user_max_price"] - user_stats["user_min_price"]
+
+    # Compute user category preferences (top category)
+    if "tag" in enriched.columns:
+        def get_top_tag(tags_series):
+            all_tags = []
+            for tags in tags_series.dropna():
+                if isinstance(tags, str):
+                    all_tags.extend([t.strip().lower() for t in tags.split(";") if t.strip()])
+            if all_tags:
+                from collections import Counter
+                return Counter(all_tags).most_common(1)[0][0]
+            return ""
+
+        user_top_tags = enriched.groupby("user_id")["tag"].apply(get_top_tag).reset_index()
+        user_top_tags.columns = ["user_id", "user_top_tag"]
+        user_stats = user_stats.merge(user_top_tags, on="user_id", how="left")
+    else:
+        user_stats["user_top_tag"] = ""
+
+    # Fill NaN values
+    numeric_cols = user_stats.select_dtypes(include=[np.number]).columns
+    user_stats[numeric_cols] = user_stats[numeric_cols].fillna(0)
+
+    return user_stats
 
 
 def train_behavior_similarity(interactions: pd.DataFrame) -> Dict[int, Dict[int, float]]:
@@ -347,6 +422,7 @@ def _prepare_ranking_dataset(
     dataset_stats: pd.DataFrame,
     labels: Optional[pd.DataFrame],
     slot_metrics: Optional[pd.DataFrame],
+    interactions: Optional[pd.DataFrame] = None,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.Series, Optional[pd.Series], str]:
     if dataset_features.empty:
         return pd.DataFrame(), pd.DataFrame(), pd.Series(dtype=int)
@@ -495,11 +571,14 @@ def _prepare_ranking_dataset(
             0.0,
         )
         target = (merged["ctr_label"] + RANKING_CVR_WEIGHT * merged["cvr_label"]).astype(float)
-        sample_weight = merged["label_exposure_count"].clip(lower=1.0).astype(float)
+        # Use log-scaled weights to prevent very high exposure items from dominating
+        sample_weight = np.log1p(merged["label_exposure_count"]).clip(lower=1.0).astype(float)
         task_type = "regression"
     else:
         target = (merged["interaction_count"] > 0).astype(int)
-        sample_weight = None
+        # Add sample weights for classification based on interaction frequency
+        # Give more weight to items with higher interaction counts
+        sample_weight = np.log1p(merged["interaction_count"]).clip(lower=1.0).astype(float)
     meta = merged[["dataset_id"]].reset_index(drop=True)
 
     return meta, features, target, sample_weight, task_type
@@ -519,6 +598,7 @@ def _train_ranking_model(
     if sample_weight is not None:
         arrays.append(sample_weight)
 
+    # First split: train+val vs test (75% / 25%)
     split_result = train_test_split(
         *arrays,
         test_size=0.25,
@@ -527,10 +607,29 @@ def _train_ranking_model(
     )
 
     if sample_weight is not None:
-        X_train, X_test, y_train, y_test, w_train, w_test = split_result
+        X_trainval, X_test, y_trainval, y_test, w_trainval, w_test = split_result
     else:
-        X_train, X_test, y_train, y_test = split_result
-        w_train = w_test = None
+        X_trainval, X_test, y_trainval, y_test = split_result
+        w_trainval = w_test = None
+
+    # Second split: train vs val (80% / 20% of trainval, i.e., 60% / 15% of total)
+    stratify_val = y_trainval if task_type == "classification" else None
+    arrays_val = [X_trainval, y_trainval]
+    if w_trainval is not None:
+        arrays_val.append(w_trainval)
+
+    split_result_val = train_test_split(
+        *arrays_val,
+        test_size=0.2,
+        random_state=42,
+        stratify=stratify_val,
+    )
+
+    if w_trainval is not None:
+        X_train, X_val, y_train, y_val, w_train, w_val = split_result_val
+    else:
+        X_train, X_val, y_train, y_val = split_result_val
+        w_train = w_val = None
 
     if task_type == "classification":
         class_counts = target.value_counts()
@@ -546,12 +645,19 @@ def _train_ranking_model(
                 ("scaler", StandardScaler()),
                 ("clf", LGBMClassifier(
                     objective="binary",
-                    n_estimators=300,
-                    learning_rate=0.05,
-                    max_depth=-1,
+                    n_estimators=500,  # Increased from 300
+                    learning_rate=0.03,  # Reduced for better convergence
+                    max_depth=8,  # Limited depth to prevent overfitting
+                    num_leaves=64,  # More leaves for better expressiveness
                     subsample=0.8,
                     colsample_bytree=0.8,
                     class_weight="balanced",
+                    reg_alpha=0.1,  # L1 regularization
+                    reg_lambda=0.1,  # L2 regularization
+                    min_child_samples=20,  # Prevent overfitting on small nodes
+                    min_split_gain=0.001,  # Minimum gain to make split
+                    random_state=42,
+                    verbose=-1,
                 )),
             ])
         else:
@@ -566,11 +672,18 @@ def _train_ranking_model(
                 ("scaler", StandardScaler()),
                 ("reg", LGBMRegressor(
                     objective="regression",
-                    n_estimators=400,
-                    learning_rate=0.03,
-                    max_depth=-1,
+                    n_estimators=600,  # Increased from 400
+                    learning_rate=0.02,  # Reduced for better convergence
+                    max_depth=10,  # Slightly deeper for regression
+                    num_leaves=96,  # More leaves for complex patterns
                     subsample=0.85,
                     colsample_bytree=0.85,
+                    reg_alpha=0.05,  # L1 regularization
+                    reg_lambda=0.05,  # L2 regularization
+                    min_child_samples=20,
+                    min_split_gain=0.001,
+                    random_state=42,
+                    verbose=-1,
                 )),
             ])
         else:
@@ -579,9 +692,29 @@ def _train_ranking_model(
                 ("reg", LinearRegression()),
             ])
 
+    # Prepare fit parameters with early stopping for LightGBM
     fit_params = {}
     if w_train is not None:
         fit_params[f"{final_step_name}__sample_weight"] = w_train
+
+    # Add early stopping for LightGBM models
+    if LIGHTGBM_AVAILABLE:
+        # Scale validation data
+        scaler = StandardScaler()
+        X_train_scaled = scaler.fit_transform(X_train)
+        X_val_scaled = scaler.transform(X_val)
+
+        # Set up eval_set for early stopping
+        if w_val is not None:
+            fit_params[f"{final_step_name}__eval_set"] = [(X_val_scaled, y_val)]
+            fit_params[f"{final_step_name}__eval_sample_weight"] = [w_val]
+        else:
+            fit_params[f"{final_step_name}__eval_set"] = [(X_val_scaled, y_val)]
+
+        fit_params[f"{final_step_name}__callbacks"] = [
+            early_stopping(stopping_rounds=50, verbose=False)
+        ]
+
     estimator.fit(X_train, y_train, **fit_params)
 
     if task_type == "classification":
