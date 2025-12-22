@@ -581,8 +581,15 @@ def _load_dataset_metadata(
     frame = _read_feature_store("SELECT * FROM dataset_features")
     source_label = "sqlite" if not frame.empty else "parquet"
     if frame.empty:
+        # Try to load enriched features with text embeddings first
+        enriched_path = DATA_DIR / "processed" / "dataset_features_with_embeddings.parquet"
         meta_path = DATA_DIR / "processed" / "dataset_features.parquet"
-        if meta_path.exists():
+
+        if enriched_path.exists():
+            frame = pd.read_parquet(enriched_path)
+            source_label = "parquet-enriched"
+            LOGGER.info("Loaded enriched dataset features with text embeddings")
+        elif meta_path.exists():
             frame = pd.read_parquet(meta_path)
             source_label = "parquet"
         else:
@@ -1441,6 +1448,20 @@ def _compute_ranking_features(
         # Fall back to zeros if no slot metrics available
         for col in slot_columns:
             features[col] = 0.0
+
+    # Add text embedding features
+    text_embedding_columns = ["text_embed_norm", "text_embed_mean", "text_embed_std"]
+    for col in text_embedding_columns:
+        if col in selected.columns:
+            features[col] = pd.to_numeric(selected[col], errors="coerce").fillna(0.0)
+        else:
+            features[col] = 0.0
+
+    # Add PCA text embedding features
+    pca_columns = [col for col in selected.columns if col.startswith("text_pca_")]
+    for col in pca_columns:
+        if col in selected.columns:
+            features[col] = pd.to_numeric(selected[col], errors="coerce").fillna(0.0)
 
     return features
 

@@ -37,6 +37,15 @@ try:
 except ImportError:  # pragma: no cover
     ONNX_AVAILABLE = False
 
+try:
+    from sentence_transformers import SentenceTransformer
+    from sklearn.decomposition import PCA
+
+    SBERT_AVAILABLE = True
+except ImportError:  # pragma: no cover
+    SBERT_AVAILABLE = False
+    LOGGER.warning("sentence-transformers not available, text embeddings will be skipped")
+
 from config.settings import (
     DATA_DIR,
     MLFLOW_EXPERIMENT_NAME,
@@ -305,6 +314,88 @@ def build_vector_recall(similarity_matrix: np.ndarray, item_ids: List[int], top_
     return neighbors
 
 
+def generate_text_embeddings(
+    dataset_features: pd.DataFrame,
+    model_name: str = "paraphrase-multilingual-MiniLM-L12-v2",
+    n_pca_components: int = 10,
+) -> Tuple[pd.DataFrame, Optional[object]]:
+    """Generate Sentence-BERT text embeddings and add them to dataset features.
+
+    Args:
+        dataset_features: DataFrame with dataset_id, description, tag columns
+        model_name: Sentence-BERT model name
+        n_pca_components: Number of PCA components for dimensionality reduction
+
+    Returns:
+        (updated_features, pca_model) - Features with embeddings, PCA model for inference
+    """
+    if not SBERT_AVAILABLE:
+        LOGGER.warning("Sentence-transformers not available, skipping text embeddings")
+        return dataset_features, None
+
+    if dataset_features.empty:
+        return dataset_features, None
+
+    try:
+        LOGGER.info("Loading Sentence-BERT model: %s", model_name)
+        model = SentenceTransformer(model_name)
+
+        # Combine description and tags
+        texts = (
+            dataset_features.get("description", "").fillna("").astype(str)
+            + " "
+            + dataset_features.get("tag", "").fillna("").astype(str)
+        ).tolist()
+
+        LOGGER.info("Generating text embeddings for %d items...", len(texts))
+        embeddings = model.encode(
+            texts,
+            show_progress_bar=True,
+            batch_size=32,
+            convert_to_numpy=True,
+        )
+
+        LOGGER.info("Text embeddings generated: shape=%s", embeddings.shape)
+
+        # Add statistical features
+        dataset_features["text_embed_norm"] = np.linalg.norm(embeddings, axis=1)
+        dataset_features["text_embed_mean"] = embeddings.mean(axis=1)
+        dataset_features["text_embed_std"] = embeddings.std(axis=1)
+
+        # Apply PCA for dimensionality reduction
+        LOGGER.info("Applying PCA to reduce embeddings to %d dimensions", n_pca_components)
+        pca = PCA(n_components=n_pca_components, random_state=42)
+        embeddings_pca = pca.fit_transform(embeddings)
+
+        explained_variance = pca.explained_variance_ratio_.sum()
+        LOGGER.info(
+            "PCA completed: %d components explain %.1f%% variance",
+            n_pca_components,
+            explained_variance * 100,
+        )
+
+        # Add PCA components as features
+        for i in range(n_pca_components):
+            dataset_features[f"text_pca_{i}"] = embeddings_pca[:, i]
+
+        # Save full embeddings for user-item similarity computation
+        # Store as columns for later use
+        for i in range(embeddings.shape[1]):
+            dataset_features[f"text_embed_{i}"] = embeddings[:, i]
+
+        LOGGER.info(
+            "Text embedding features added: 3 stats + %d PCA + %d full embeddings",
+            n_pca_components,
+            embeddings.shape[1],
+        )
+
+        return dataset_features, pca
+
+    except Exception as e:  # noqa: BLE001
+        LOGGER.error("Failed to generate text embeddings: %s", e)
+        return dataset_features, None
+
+
 def save_pickle(obj, path: Path) -> None:
     with open(path, "wb") as stream:
         pickle.dump(obj, stream)
@@ -535,6 +626,28 @@ def _prepare_ranking_dataset(
         if col not in merged.columns:
             merged[col] = 0.0
         features[col] = merged[col].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+
+    # Add text embedding features
+    text_embedding_columns = ["text_embed_norm", "text_embed_mean", "text_embed_std"]
+    for col in text_embedding_columns:
+        if col in merged.columns:
+            features[col] = (
+                pd.to_numeric(merged[col], errors="coerce")
+                .replace([np.inf, -np.inf], np.nan)
+                .fillna(0.0)
+            )
+        else:
+            features[col] = 0.0
+
+    # Add PCA text embedding features
+    pca_columns = [col for col in merged.columns if col.startswith("text_pca_")]
+    for col in pca_columns:
+        if col in merged.columns:
+            features[col] = (
+                pd.to_numeric(merged[col], errors="coerce")
+                .replace([np.inf, -np.inf], np.nan)
+                .fillna(0.0)
+            )
 
     sample_weight: Optional[pd.Series]
     task_type = "classification"
@@ -811,6 +924,15 @@ def main() -> None:
 
     reduce_memory_usage()
 
+    # Generate text embeddings for ranking features
+    LOGGER.info("Generating text embeddings for ranking features...")
+    dataset_features, text_pca_model = generate_text_embeddings(
+        dataset_features,
+        model_name=os.getenv("SBERT_MODEL", "paraphrase-multilingual-MiniLM-L12-v2"),
+        n_pca_components=int(os.getenv("TEXT_PCA_COMPONENTS", "10")),
+    )
+    reduce_memory_usage()
+
     # Train models with memory monitoring
     LOGGER.info("Training behavior similarity model...")
     behavior_model = train_behavior_similarity(interactions)
@@ -855,7 +977,34 @@ def main() -> None:
     save_json(popular_items, popular_path)
     save_vector_recall(vector_recall, vector_path)
 
+    # Save text PCA model and enriched dataset features
+    text_pca_path = MODELS_DIR / "text_pca_model.pkl"
+    dataset_features_enriched_path = PROCESSED_DIR / "dataset_features_with_embeddings.parquet"
+
     artifacts: List[Path] = [behavior_path, content_path, popular_path, vector_path]
+
+    if text_pca_model is not None:
+        save_pickle(text_pca_model, text_pca_path)
+        artifacts.append(text_pca_path)
+        LOGGER.info("Saved text PCA model to %s", text_pca_path)
+
+    # Save enriched dataset features with text embeddings
+    if not dataset_features.empty:
+        # Save only necessary columns (not full embeddings, they're too large)
+        embedding_cols = [col for col in dataset_features.columns if col.startswith("text_embed_")]
+        pca_cols = [col for col in dataset_features.columns if col.startswith("text_pca_")]
+        stat_cols = ["text_embed_norm", "text_embed_mean", "text_embed_std"]
+
+        # Keep original columns + embedding features
+        base_cols = ["dataset_id", "description", "tag", "price"]
+        keep_cols = [c for c in base_cols if c in dataset_features.columns]
+        keep_cols.extend([c for c in stat_cols if c in dataset_features.columns])
+        keep_cols.extend(pca_cols)
+        keep_cols.extend(embedding_cols)
+
+        dataset_features_to_save = dataset_features[keep_cols]
+        dataset_features_to_save.to_parquet(dataset_features_enriched_path, index=False)
+        LOGGER.info("Saved enriched dataset features to %s", dataset_features_enriched_path)
     if ranking_model is not None:
         save_pickle(ranking_model, rank_model_path)
         artifacts.append(rank_model_path)
