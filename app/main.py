@@ -175,10 +175,10 @@ service_info.info({
 
 REQUEST_ID_HEADER = "X-Request-ID"
 DEFAULT_CHANNEL_WEIGHTS = {
-    "behavior": 1.0,
-    "content": 0.5,
-    "vector": 0.4,
-    "popular": 0.01,
+    "behavior": 1.5,  # Increased: strongest personalization signal
+    "content": 0.8,   # Increased: important for relevance
+    "vector": 0.5,    # Slightly increased but relatively lower priority
+    "popular": 0.05,  # Increased: provides diversity
 }
 
 
@@ -777,27 +777,201 @@ def _sorted_items(scores: Dict[int, float]) -> List[int]:
     return [item for item, _ in sorted(scores.items(), key=lambda kv: kv[1], reverse=True)]
 
 
+def _jaccard_similarity(tags1: List[str], tags2: List[str]) -> float:
+    """Calculate Jaccard similarity between two tag lists."""
+    if not tags1 or not tags2:
+        return 0.0
+    set1 = set(t.lower().strip() for t in tags1 if t)
+    set2 = set(t.lower().strip() for t in tags2 if t)
+    if not set1 or not set2:
+        return 0.0
+    intersection = len(set1 & set2)
+    union = len(set1 | set2)
+    return intersection / union if union > 0 else 0.0
+
+
+def _apply_mmr_reranking(
+    scores: Dict[int, float],
+    dataset_tags: Dict[int, List[str]],
+    lambda_param: float = 0.7,
+    limit: int = 10,
+) -> List[int]:
+    """
+    Apply MMR (Maximal Marginal Relevance) reranking for diversity.
+
+    MMR Score = λ * Relevance - (1-λ) * max_similarity_to_selected
+
+    Args:
+        scores: Dataset ID to relevance score mapping
+        dataset_tags: Dataset ID to tags list mapping
+        lambda_param: Trade-off between relevance (1.0) and diversity (0.0)
+        limit: Number of items to select
+
+    Returns:
+        List of dataset IDs in MMR order
+    """
+    if not scores:
+        return []
+
+    # Normalize scores to [0, 1] range
+    max_score = max(scores.values()) if scores else 1.0
+    min_score = min(scores.values()) if scores else 0.0
+    score_range = max_score - min_score if max_score > min_score else 1.0
+
+    normalized_scores = {
+        item_id: (score - min_score) / score_range
+        for item_id, score in scores.items()
+    }
+
+    selected = []
+    candidates = set(scores.keys())
+
+    while len(selected) < limit and candidates:
+        mmr_scores = {}
+
+        for candidate in candidates:
+            relevance = normalized_scores[candidate]
+
+            # Calculate maximum similarity to already selected items
+            if selected:
+                candidate_tags = dataset_tags.get(candidate, [])
+                max_sim = max(
+                    _jaccard_similarity(candidate_tags, dataset_tags.get(s, []))
+                    for s in selected
+                )
+            else:
+                max_sim = 0.0
+
+            # MMR score: balance relevance and diversity
+            mmr_scores[candidate] = lambda_param * relevance - (1 - lambda_param) * max_sim
+
+        # Select item with highest MMR score
+        if mmr_scores:
+            best = max(mmr_scores.items(), key=lambda x: x[1])[0]
+            selected.append(best)
+            candidates.remove(best)
+        else:
+            break
+
+    return selected
+
+
+def _apply_exploration(
+    ranked_ids: List[int],
+    all_dataset_ids: Set[int],
+    epsilon: float = 0.1,
+) -> List[int]:
+    """
+    Apply epsilon-greedy exploration strategy.
+
+    Replace some highly-ranked items with random exploratory items.
+
+    Args:
+        ranked_ids: Already ranked dataset IDs
+        all_dataset_ids: All available dataset IDs for exploration
+        epsilon: Exploration rate (0.0 = no exploration, 1.0 = full random)
+
+    Returns:
+        List of dataset IDs with exploration applied
+    """
+    import random
+
+    if epsilon <= 0 or not all_dataset_ids:
+        return ranked_ids
+
+    n_total = len(ranked_ids)
+    n_explore = min(int(n_total * epsilon), n_total)
+    n_exploit = n_total - n_explore
+
+    # Keep top (1-epsilon) items for exploitation
+    exploit_ids = ranked_ids[:n_exploit]
+
+    # Randomly sample for exploration (exclude already selected items)
+    explore_pool = list(all_dataset_ids - set(exploit_ids))
+    if explore_pool:
+        n_explore = min(n_explore, len(explore_pool))
+        explore_ids = random.sample(explore_pool, n_explore)
+    else:
+        # If no items left to explore, just return exploit items
+        explore_ids = []
+
+    return exploit_ids + explore_ids
+
+
 def _build_response_items(
     candidate_scores: Dict[int, float],
     reasons: Dict[int, str],
     limit: int,
     metadata: Dict[int, Dict[str, Optional[str]]],
+    dataset_tags: Optional[Dict[int, List[str]]] = None,
+    apply_mmr: bool = True,
+    mmr_lambda: float = 0.7,
+    apply_exploration: bool = False,
+    exploration_epsilon: float = 0.1,
+    all_dataset_ids: Optional[Set[int]] = None,
 ) -> List[RecommendationItem]:
+    """
+    Build response items with optional MMR reranking and exploration.
+
+    Args:
+        candidate_scores: Dataset ID to score mapping
+        reasons: Dataset ID to reason mapping
+        limit: Maximum number of items to return
+        metadata: Dataset metadata
+        dataset_tags: Dataset tags for MMR (optional)
+        apply_mmr: Whether to apply MMR reranking
+        mmr_lambda: MMR lambda parameter (relevance vs diversity trade-off)
+        apply_exploration: Whether to apply epsilon-greedy exploration
+        exploration_epsilon: Exploration rate (0.0-1.0)
+        all_dataset_ids: All available dataset IDs for exploration pool
+
+    Returns:
+        List of recommendation items
+    """
+    if not candidate_scores:
+        return []
+
+    # Apply MMR reranking if enabled and tags available
+    if apply_mmr and dataset_tags:
+        ranked_ids = _apply_mmr_reranking(
+            candidate_scores,
+            dataset_tags,
+            lambda_param=mmr_lambda,
+            limit=limit,
+        )
+    else:
+        # Fallback to score-based ranking
+        ranked_ids = [
+            dataset_id for dataset_id, _ in
+            sorted(candidate_scores.items(), key=lambda kv: kv[1], reverse=True)
+        ][:limit]
+
+    # Apply exploration if enabled
+    if apply_exploration and all_dataset_ids:
+        ranked_ids = _apply_exploration(
+            ranked_ids,
+            all_dataset_ids,
+            epsilon=exploration_epsilon,
+        )
+
     result: List[RecommendationItem] = []
-    for dataset_id, score in sorted(candidate_scores.items(), key=lambda kv: kv[1], reverse=True):
+    for dataset_id in ranked_ids:
         info = metadata.get(dataset_id, {})
+        # Use score from candidate_scores if available, otherwise use a default score
+        score = candidate_scores.get(dataset_id, 0.5)
+        reason = reasons.get(dataset_id, "exploration" if dataset_id not in candidate_scores else "unknown")
+
         result.append(
             RecommendationItem(
                 dataset_id=dataset_id,
                 title=info.get("title"),
                 price=info.get("price"),
                 cover_image=info.get("cover_image"),
-                score=float(score),
-                reason=reasons.get(dataset_id, "unknown"),
+                score=score,
+                reason=reason,
             )
         )
-        if len(result) >= limit:
-            break
+
     return result
 
 
@@ -1083,34 +1257,81 @@ def _apply_personalization(
     reasons: Dict[int, str],
     state,
     behavior: Dict[int, Dict[int, float]],
-    history_limit: int = 20,
+    history_limit: int = 50,  # Increased to capture more history
+    decay_half_life_days: float = 7.0,  # Interest decays by half every 7 days
 ) -> None:
+    """
+    Apply personalization with time-based interest decay.
+
+    Args:
+        user_id: User ID
+        scores: Current recommendation scores
+        reasons: Recommendation reasons
+        state: Application state
+        behavior: Behavior similarity matrix
+        history_limit: Number of historical interactions to consider
+        decay_half_life_days: Days for interest to decay by half
+    """
     if not user_id:
         return
     user_history = state.user_history.get(int(user_id))
     if not user_history:
         return
 
+    import datetime
+    now = datetime.datetime.now()
+
     recent_history = user_history[:history_limit]
     history_ids = {record["dataset_id"] for record in recent_history}
+
+    # Remove already interacted items
     for dataset_id in history_ids:
         scores.pop(dataset_id, None)
         reasons.pop(dataset_id, None)
 
     tag_pref = state.user_tag_preferences.get(int(user_id), {})
 
+    # Apply time-decayed personalization boost
     for dataset_id in list(scores.keys()):
         boost = 0.0
         for record in recent_history:
             source_id = record["dataset_id"]
-            weight = record["weight"]
+
+            # Calculate time decay factor
+            timestamp = record.get("last_event_time")
+            if timestamp:
+                try:
+                    # Handle both datetime and timestamp formats
+                    if isinstance(timestamp, str):
+                        event_time = datetime.datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+                    else:
+                        event_time = timestamp
+                    days_ago = (now - event_time).total_seconds() / 86400  # seconds to days
+                    decay_factor = 0.5 ** (days_ago / decay_half_life_days)
+                except (ValueError, AttributeError):
+                    decay_factor = 1.0  # Fallback if timestamp parsing fails
+            else:
+                decay_factor = 1.0  # No decay if timestamp not available
+            weight = record.get("weight", 1.0)
             sim = behavior.get(source_id, {}).get(dataset_id, 0.0)
             if sim:
-                boost += sim * weight * 0.5
+                # Apply time decay to the similarity boost
+                boost += sim * weight * decay_factor * 0.5
+
+        # Tag preference boost (with overall decay based on oldest interaction)
         candidate_tags = state.dataset_tags.get(dataset_id, [])
         if candidate_tags and tag_pref:
             tag_boost = sum(tag_pref.get(tag, 0.0) for tag in candidate_tags)
-            boost += tag_boost * 0.2
+            # Use average decay factor from recent history
+            if recent_history:
+                avg_decay = sum(
+                    0.5 ** ((now - rec.get("last_event_time", now)).total_seconds() / 86400 / decay_half_life_days)
+                    if rec.get("last_event_time") else 1.0
+                    for rec in recent_history[:5]  # Consider top 5 recent
+                ) / min(5, len(recent_history))
+            else:
+                avg_decay = 1.0
+            boost += tag_boost * avg_decay * 0.2
 
         if boost > 0:
             scores[dataset_id] += boost
@@ -1159,6 +1380,31 @@ def _compute_ranking_features(
     features["tag_count"] = selected["tag_count"].fillna(0.0)
     features["weight_log"] = np.log1p(stats["total_weight"].clip(lower=0.0))
     features["interaction_count"] = stats["interaction_count"].fillna(0.0)
+
+    # Add global popularity features
+    if not stats.empty and "interaction_count" in stats.columns:
+        # Compute rank across all datasets in current batch
+        features["popularity_rank"] = stats["interaction_count"].rank(ascending=False, method="dense").fillna(0.0)
+        features["popularity_percentile"] = stats["interaction_count"].rank(pct=True).fillna(0.5)
+    else:
+        features["popularity_rank"] = 0.0
+        features["popularity_percentile"] = 0.5
+
+    # Add price bucket feature
+    features["price_bucket"] = pd.cut(
+        selected["price"],
+        bins=[-np.inf, 0.5, 1.0, 2.0, 5.0, np.inf],
+        labels=[0, 1, 2, 3, 4]
+    ).astype(float).fillna(0.0)
+
+    # Add interaction density features (simplified for inference)
+    features["days_since_last_interaction"] = 30.0  # Default assumption
+    features["interaction_density"] = features["interaction_count"] / 30.0
+
+    # Add text richness features
+    features["has_description"] = (features["description_length"] > 0).astype(float)
+    features["has_tags"] = (features["tag_count"] > 0).astype(float)
+    features["content_richness"] = features["description_length"] * features["tag_count"]
 
     optional_columns = ["image_richness_score", "image_embed_norm", "has_images", "has_cover"]
     for col in optional_columns:
@@ -1677,7 +1923,12 @@ async def get_similar(
                 operation="model_inference",
                 timeout=TimeoutManager.get_timeout("model_inference"),
             )
-            items = _build_response_items(scores, reasons, limit, state.metadata)
+            items = _build_response_items(
+                scores, reasons, limit, state.metadata,
+                dataset_tags=state.dataset_tags,
+                apply_mmr=True,
+                mmr_lambda=0.7
+            )
             return items, reasons, local_variant, local_bundle.run_id
 
         try:
@@ -1923,7 +2174,12 @@ async def recommend_for_detail(
                 operation="model_inference",
                 timeout=TimeoutManager.get_timeout("model_inference"),
             )
-            items = _build_response_items(scores, reasons, limit, state.metadata)
+            items = _build_response_items(
+                scores, reasons, limit, state.metadata,
+                dataset_tags=state.dataset_tags,
+                apply_mmr=True,
+                mmr_lambda=0.7
+            )
             return items, reasons, local_variant, local_bundle.run_id
 
         try:

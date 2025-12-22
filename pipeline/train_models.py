@@ -373,7 +373,52 @@ def _prepare_ranking_dataset(
     merged["price_log"] = np.log1p(merged["price"].clip(lower=0.0))
     merged["weight_log"] = np.log1p(merged["total_weight"].clip(lower=0.0))
 
-    base_columns = ["price_log", "description_length", "tag_count", "weight_log", "interaction_count"]
+    # Add global popularity rank feature
+    if "interaction_count" in merged.columns:
+        merged["popularity_rank"] = merged["interaction_count"].rank(ascending=False, method="dense")
+        merged["popularity_percentile"] = merged["interaction_count"].rank(pct=True)
+    else:
+        merged["popularity_rank"] = 0.0
+        merged["popularity_percentile"] = 0.5
+
+    # Add price bucket feature (categorical encoded as numeric)
+    merged["price_bucket"] = pd.cut(
+        merged["price"],
+        bins=[-np.inf, 0.5, 1.0, 2.0, 5.0, np.inf],
+        labels=[0, 1, 2, 3, 4]
+    ).astype(float).fillna(0.0)
+
+    # Add interaction density (interactions per day if timestamp available)
+    if "last_event_time" in dataset_stats.columns and not dataset_stats.empty:
+        try:
+            merged_stats = merged.merge(
+                dataset_stats[["dataset_id", "last_event_time"]],
+                on="dataset_id",
+                how="left"
+            )
+            now = pd.Timestamp.now()
+            merged["days_since_last_interaction"] = (
+                (now - pd.to_datetime(merged_stats["last_event_time"], errors="coerce")).dt.days
+            ).fillna(365.0).clip(upper=365.0)
+            merged["interaction_density"] = merged["interaction_count"] / (merged["days_since_last_interaction"] + 1)
+        except Exception:  # noqa: BLE001
+            merged["days_since_last_interaction"] = 30.0
+            merged["interaction_density"] = merged["interaction_count"] / 30.0
+    else:
+        merged["days_since_last_interaction"] = 30.0
+        merged["interaction_density"] = merged["interaction_count"] / 30.0
+
+    # Add text richness features
+    merged["has_description"] = (merged["description_length"] > 0).astype(float)
+    merged["has_tags"] = (merged["tag_count"] > 0).astype(float)
+    merged["content_richness"] = merged["description_length"] * merged["tag_count"]
+
+    base_columns = [
+        "price_log", "description_length", "tag_count", "weight_log", "interaction_count",
+        "popularity_rank", "popularity_percentile", "price_bucket",
+        "days_since_last_interaction", "interaction_density",
+        "has_description", "has_tags", "content_richness"
+    ]
     features = merged[base_columns].replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
     optional_columns = ["image_richness_score", "image_embed_norm", "has_images", "has_cover"]
