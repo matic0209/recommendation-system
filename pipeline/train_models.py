@@ -337,8 +337,16 @@ def generate_text_embeddings(
         return dataset_features, None
 
     try:
-        LOGGER.info("Loading Sentence-BERT model: %s", model_name)
-        model = SentenceTransformer(model_name)
+        # Check if model_name is a local path or model name
+        from pathlib import Path
+        model_path = Path(model_name)
+
+        if model_path.exists() and model_path.is_dir():
+            LOGGER.info("Loading Sentence-BERT model from local path: %s", model_name)
+            model = SentenceTransformer(model_name, device='cpu')
+        else:
+            LOGGER.info("Loading Sentence-BERT model: %s", model_name)
+            model = SentenceTransformer(model_name, device='cpu')
 
         # Combine description and tags
         texts = (
