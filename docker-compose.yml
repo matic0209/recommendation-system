@@ -143,6 +143,7 @@ services:
       - /dianshu/backup/data/dianshu_data/jsons:/dianshu/backup/data/dianshu_data/jsons:ro
       - /opt/recommend/cache/sentence-transformers:/opt/recommend/cache/sentence-transformers
       - /opt/recommend/cache/huggingface:/opt/recommend/cache/huggingface
+      - /root/recommendation-system/models/sbert:/root/recommendation-system/models/sbert
     networks:
       - recommend-net
 
@@ -200,6 +201,7 @@ services:
       - mlflow-data:/mlflow
       - /dianshu/backup/data/dianshu_data/jsons:/dianshu/backup/data/dianshu_data/jsons:ro
       - ./cache:/opt/recommend/cache
+      - /root/recommendation-system/models/sbert:/root/recommendation-system/models/sbert
     ports:
       - "${AIRFLOW_WEB_HOST_PORT:-8080}:8080"
     command: webserver
@@ -245,6 +247,7 @@ services:
       - ./airflow/plugins:/opt/airflow/plugins
       - /dianshu/backup/data/dianshu_data/jsons:/dianshu/backup/data/dianshu_data/jsons:ro
       - ./cache:/opt/recommend/cache
+      - /root/recommendation-system/models/sbert:/root/recommendation-system/models/sbert
     command: scheduler
     extra_hosts:
       - "host.docker.internal:host-gateway"
