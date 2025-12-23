@@ -394,17 +394,35 @@ def generate_text_embeddings(
         ).tolist()
 
         embed_batch_size = int(os.getenv("TEXT_EMBED_BATCH_SIZE", "32"))
+        embed_workers = int(os.getenv("TEXT_EMBED_WORKERS", "1"))
+        chunk_size = int(os.getenv("TEXT_EMBED_CHUNK_SIZE", "1000"))
         LOGGER.info(
-            "Generating text embeddings for %d items (batch_size=%d)...",
+            "Generating text embeddings for %d items (batch_size=%d, workers=%d, chunk_size=%d)...",
             len(texts),
             embed_batch_size,
+            embed_workers,
+            chunk_size,
         )
-        embeddings = model.encode(
-            texts,
-            show_progress_bar=True,
-            batch_size=embed_batch_size,
-            convert_to_numpy=True,
-        )
+        if embed_workers > 1:
+            devices = ["cpu"] * embed_workers
+            pool = model.start_multi_process_pool(target_devices=devices)
+            try:
+                embeddings = model.encode_multi_process(
+                    texts,
+                    pool,
+                    batch_size=embed_batch_size,
+                    chunk_size=chunk_size,
+                    show_progress_bar=True,
+                )
+            finally:
+                model.stop_multi_process_pool(pool)
+        else:
+            embeddings = model.encode(
+                texts,
+                show_progress_bar=True,
+                batch_size=embed_batch_size,
+                convert_to_numpy=True,
+            )
 
         LOGGER.info("Text embeddings generated: shape=%s", embeddings.shape)
 
