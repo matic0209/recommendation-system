@@ -497,6 +497,7 @@ class FeatureEngineV2:
                     if pd.api.types.is_datetime64_any_dtype(df_copy[col]):
                         df_copy[col] = df_copy[col].dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
+                conn.execute(f'DROP TABLE IF EXISTS "{name}"')
                 df_copy.to_sql(name, conn, if_exists="replace", index=False)
 
                 # Create indexes
