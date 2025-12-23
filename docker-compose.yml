@@ -231,7 +231,9 @@ services:
       HF_HOME: /opt/recommend/cache/huggingface
       TRANSFORMERS_CACHE: /opt/recommend/cache/huggingface/hub
       CLIP_MODEL_PATH: /opt/recommend/cache/sentence-transformers/clip-ViT-B-32
-      HF_HUB_OFFLINE: "1"
+      # HF_HUB_OFFLINE: "1"  # 注释掉以允许从镜像下载SBERT模型
+      SBERT_MODEL: ${SBERT_MODEL:-paraphrase-multilingual-MiniLM-L12-v2}
+      TEXT_PCA_COMPONENTS: ${TEXT_PCA_COMPONENTS:-10}
     volumes:
       - mlflow-data:/mlflow
       - .:/opt/recommend

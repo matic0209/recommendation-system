@@ -10,6 +10,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Iterable, List, Tuple, Optional
 
+# IMPORTANT: Set HF_ENDPOINT before importing any HuggingFace libraries
+# This ensures the mirror is used for all model downloads
+if os.getenv("HF_ENDPOINT"):
+    os.environ["HF_ENDPOINT"] = os.getenv("HF_ENDPOINT")
+    logging.info("HuggingFace endpoint set to: %s", os.environ["HF_ENDPOINT"])
+
 import mlflow
 import numpy as np
 import pandas as pd
@@ -337,11 +343,9 @@ def generate_text_embeddings(
         return dataset_features, None
 
     try:
-        # Set HuggingFace endpoint for mirror support
-        hf_endpoint = os.getenv("HF_ENDPOINT", "")
-        if hf_endpoint:
-            os.environ["HF_ENDPOINT"] = hf_endpoint
-            LOGGER.info("Using HuggingFace mirror: %s", hf_endpoint)
+        # HF_ENDPOINT is already set at module level, just log it
+        hf_endpoint = os.getenv("HF_ENDPOINT", "https://huggingface.co")
+        LOGGER.info("Using HuggingFace endpoint: %s", hf_endpoint)
 
         # Check if model_name is a local path or model name
         from pathlib import Path
