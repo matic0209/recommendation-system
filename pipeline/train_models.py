@@ -393,11 +393,16 @@ def generate_text_embeddings(
             + dataset_features.get("tag", "").fillna("").astype(str)
         ).tolist()
 
-        LOGGER.info("Generating text embeddings for %d items...", len(texts))
+        embed_batch_size = int(os.getenv("TEXT_EMBED_BATCH_SIZE", "32"))
+        LOGGER.info(
+            "Generating text embeddings for %d items (batch_size=%d)...",
+            len(texts),
+            embed_batch_size,
+        )
         embeddings = model.encode(
             texts,
             show_progress_bar=True,
-            batch_size=32,
+            batch_size=embed_batch_size,
             convert_to_numpy=True,
         )
 
