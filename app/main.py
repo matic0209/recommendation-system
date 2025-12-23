@@ -64,6 +64,7 @@ from app.sentry_config import (
 
 EXECUTOR_MAX_WORKERS = int(os.getenv("RECO_THREAD_POOL_WORKERS", "4"))
 EXECUTOR = ThreadPoolExecutor(max_workers=EXECUTOR_MAX_WORKERS)
+SLOW_OPERATION_THRESHOLD = float(os.getenv("SLOW_OPERATION_THRESHOLD", "0.5"))
 
 
 class ExperimentFileHandler(FileSystemEventHandler):
@@ -706,8 +707,13 @@ def _parse_dataset_metadata_frame(
         dataset_id = int(pd.to_numeric(row.get("dataset_id"), errors="coerce") or 0)
         if not dataset_id:
             continue
+        title_value = row.get("title")
+        if title_value in (None, ""):
+            title = None
+        else:
+            title = str(title_value)
         metadata[dataset_id] = {
-            "title": row.get("title"),
+            "title": title,
             "price": row.get("price"),
             "cover_image": row.get("cover_image"),
             "company": row.get("create_company_name"),
@@ -1285,11 +1291,21 @@ async def _call_blocking(
     timeout: float,
     **kwargs,
 ):
+    start = time.perf_counter()
     try:
-        return await asyncio.wait_for(
+        result = await asyncio.wait_for(
             _run_in_executor(func, *args, **kwargs),
             timeout=timeout,
         )
+        duration = time.perf_counter() - start
+        if duration >= SLOW_OPERATION_THRESHOLD:
+            LOGGER.info(
+                "Slow blocking call (endpoint=%s, operation=%s, duration=%.3fs)",
+                endpoint,
+                operation,
+                duration,
+            )
+        return result
     except asyncio.TimeoutError as exc:
         LOGGER.warning(
             "Operation timed out (endpoint=%s, operation=%s)", endpoint, operation
@@ -2449,10 +2465,30 @@ async def get_similar(
             )
             return items, reasons, local_variant, local_bundle.run_id, effective_weights
 
+        compute_started = time.perf_counter()
+        compute_started = time.perf_counter()
         try:
             items, reasons, variant, run_id, applied_channel_weights = await asyncio.wait_for(
                 _compute(),
                 timeout=TimeoutManager.get_timeout("recommendation_total"),
+            )
+            compute_duration = time.perf_counter() - compute_started
+            LOGGER.info(
+                "Recommendation compute completed (endpoint=%s, dataset=%s, user=%s, elapsed=%.3fs, items=%d)",
+                endpoint,
+                dataset_id,
+                user_id,
+                compute_duration,
+                len(items),
+            )
+            compute_duration = time.perf_counter() - compute_started
+            LOGGER.info(
+                "Recommendation compute completed (endpoint=%s, dataset=%s, user=%s, elapsed=%.3fs, items=%d)",
+                endpoint,
+                dataset_id,
+                None,
+                compute_duration,
+                len(items),
             )
         except asyncio.TimeoutError:
             recommendation_timeouts_total.labels(endpoint=endpoint, operation="total").inc()
