@@ -1,5 +1,8 @@
 x-env-file: &default-env
   env_file:
+    # Load production config first (if exists), then fall back to development config
+    # Production: docker-compose --env-file .env.prod up
+    # Development: docker-compose up (uses .env)
     - .env
 
 services:

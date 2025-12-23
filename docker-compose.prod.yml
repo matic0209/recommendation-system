@@ -1,0 +1,25 @@
+# Production environment overrides
+# Usage: docker-compose -f docker-compose.yml -f docker-compose.prod.yml up
+
+x-env-file-prod: &prod-env
+  env_file:
+    - .env.prod
+
+services:
+  recommendation-api:
+    <<: *prod-env
+
+  report-viewer:
+    <<: *prod-env
+
+  airflow-init:
+    <<: *prod-env
+
+  airflow-webserver:
+    <<: *prod-env
+
+  airflow-scheduler:
+    <<: *prod-env
+
+  notification-gateway:
+    <<: *prod-env

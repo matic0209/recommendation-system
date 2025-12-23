@@ -11,15 +11,19 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Tuple, Optional
 
 # Load .env file if running outside Docker (for development/testing)
+# Docker Compose already loads env vars, so this is only for local development
 try:
     from dotenv import load_dotenv
-    # Load .env from project root
+    # Allow specifying env file via ENV_FILE environment variable
+    # Default: .env (development), can be set to .env.prod (production local testing)
     project_root = Path(__file__).parent.parent
-    env_file = project_root / ".env"
+    env_file_name = os.getenv("ENV_FILE", ".env")
+    env_file = project_root / env_file_name
     if env_file.exists():
-        load_dotenv(env_file, override=False)  # Don't override existing env vars
+        load_dotenv(env_file, override=False)  # Don't override existing env vars from docker-compose
+        print(f"[INFO] Loaded environment from: {env_file_name}")
 except ImportError:
-    pass  # dotenv not installed, rely on system env vars
+    pass  # dotenv not installed, rely on system env vars (e.g., in Docker)
 
 # IMPORTANT: Set HF_ENDPOINT before importing any HuggingFace libraries
 # This ensures the mirror is used for all model downloads
