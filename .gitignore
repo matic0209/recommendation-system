@@ -149,6 +149,9 @@ logs/
 *.log
 models/*.pkl
 
+# Environment configs
+.env.prod
+
 # Exclude all data directories and files
 data/
 *.parquet
