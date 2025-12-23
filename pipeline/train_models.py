@@ -337,6 +337,12 @@ def generate_text_embeddings(
         return dataset_features, None
 
     try:
+        # Set HuggingFace endpoint for mirror support
+        hf_endpoint = os.getenv("HF_ENDPOINT", "")
+        if hf_endpoint:
+            os.environ["HF_ENDPOINT"] = hf_endpoint
+            LOGGER.info("Using HuggingFace mirror: %s", hf_endpoint)
+
         # Check if model_name is a local path or model name
         from pathlib import Path
         model_path = Path(model_name)
@@ -345,8 +351,22 @@ def generate_text_embeddings(
             LOGGER.info("Loading Sentence-BERT model from local path: %s", model_name)
             model = SentenceTransformer(model_name, device='cpu')
         else:
+            # Try to load model, handling both with and without prefix
             LOGGER.info("Loading Sentence-BERT model: %s", model_name)
-            model = SentenceTransformer(model_name, device='cpu')
+
+            try:
+                # First try with sentence-transformers/ prefix
+                if not model_name.startswith("sentence-transformers/"):
+                    full_model_name = f"sentence-transformers/{model_name}"
+                else:
+                    full_model_name = model_name
+
+                LOGGER.info("Attempting to download from: %s", full_model_name)
+                model = SentenceTransformer(full_model_name, device='cpu')
+            except Exception as e:
+                LOGGER.warning("Failed to download with prefix, trying without: %s", e)
+                # Fallback: try without prefix
+                model = SentenceTransformer(model_name, device='cpu')
 
         # Combine description and tags
         texts = (
@@ -401,6 +421,13 @@ def generate_text_embeddings(
 
     except Exception as e:  # noqa: BLE001
         LOGGER.error("Failed to generate text embeddings: %s", e)
+        LOGGER.warning(
+            "Text embeddings will be skipped. To fix this:\n"
+            "  1. Check network access to HuggingFace mirror: %s\n"
+            "  2. Or download model manually and set SBERT_MODEL to local path\n"
+            "  3. Or disable embeddings by commenting out generate_text_embeddings() call",
+            os.getenv("HF_ENDPOINT", "https://huggingface.co")
+        )
         return dataset_features, None
 
 
