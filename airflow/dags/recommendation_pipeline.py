@@ -128,6 +128,11 @@ with DAG(
         bash_command="python -m pipeline.evaluate",
     )
 
+    train_channel_weights = BashOperator(
+        task_id="train_channel_weights",
+        bash_command="python -m pipeline.train_channel_weights",
+    )
+
     reconcile_metrics = BashOperator(
         task_id="reconcile_metrics",
         bash_command="python -m scripts.reconcile_business_metrics --start {{ ds }} --end {{ ds }}",
@@ -135,4 +140,4 @@ with DAG(
 
     # Note: image_embeddings task removed - visual features are optional and require sentence-transformers
     # Statistical image features are still included in build_features
-    extract_load >> build_features >> data_quality >> train_models >> recall_engine >> evaluate >> reconcile_metrics
+    extract_load >> build_features >> data_quality >> train_models >> recall_engine >> evaluate >> train_channel_weights >> reconcile_metrics

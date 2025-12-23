@@ -17,6 +17,7 @@ from functools import partial
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
 from datetime import datetime, timezone
+from threading import Lock
 
 import numpy as np
 import pandas as pd
@@ -183,6 +184,88 @@ DEFAULT_CHANNEL_WEIGHTS = {
 }
 
 
+class HotUserData:
+    """Manage user-centric datasets with TTL-based refresh."""
+
+    def __init__(self, dataset_tags: Dict[int, List[str]], ttl_seconds: int = 300):
+        self.dataset_tags = dataset_tags
+        self.ttl_seconds = ttl_seconds
+        self._lock = Lock()
+        self._last_refresh = 0.0
+        self._user_history: Dict[int, List[Dict[str, float]]] = {}
+        self._user_history_sets: Dict[int, Set[int]] = {}
+        self._user_tag_preferences: Dict[int, Dict[str, float]] = {}
+        self._user_profiles: Dict[int, Dict[str, Optional[str]]] = {}
+
+    def update_dataset_tags(self, dataset_tags: Dict[int, List[str]]) -> None:
+        self.dataset_tags = dataset_tags
+        # Force refresh so tag preferences align with new tags
+        self._last_refresh = 0.0
+
+    def bootstrap(
+        self,
+        history: Dict[int, List[Dict[str, float]]],
+        profiles: Dict[int, Dict[str, Optional[str]]],
+    ) -> None:
+        self._user_history = history or {}
+        self._user_profiles = profiles or {}
+        self._user_history_sets = {
+            user_id: {record["dataset_id"] for record in records}
+            for user_id, records in self._user_history.items()
+        }
+        self._user_tag_preferences = _build_user_tag_preferences(self._user_history, self.dataset_tags)
+        self._last_refresh = time.time()
+
+    def _is_expired(self) -> bool:
+        if self.ttl_seconds <= 0:
+            return False
+        return (time.time() - self._last_refresh) > self.ttl_seconds
+
+    def _refresh_locked(self) -> None:
+        fresh_history = _load_user_history()
+        fresh_profiles = _load_user_profile()
+        self._user_history = fresh_history
+        self._user_profiles = fresh_profiles
+        self._user_history_sets = {
+            user_id: {record["dataset_id"] for record in records}
+            for user_id, records in fresh_history.items()
+        }
+        self._user_tag_preferences = _build_user_tag_preferences(fresh_history, self.dataset_tags)
+        self._last_refresh = time.time()
+        LOGGER.info("Hot user data refreshed (users=%d)", len(fresh_history))
+
+    def ensure_fresh(self, *, force: bool = False) -> None:
+        if not force and self._user_history and not self._is_expired():
+            return
+        with self._lock:
+            if force or not self._user_history or self._is_expired():
+                self._refresh_locked()
+
+    def get_history(self) -> Dict[int, List[Dict[str, float]]]:
+        self.ensure_fresh()
+        return self._user_history
+
+    def get_history_for_user(self, user_id: int) -> Optional[List[Dict[str, float]]]:
+        history = self.get_history()
+        return history.get(int(user_id))
+
+    def get_history_sets(self) -> Dict[int, Set[int]]:
+        self.ensure_fresh()
+        return self._user_history_sets
+
+    def get_tag_preferences(self) -> Dict[int, Dict[str, float]]:
+        self.ensure_fresh()
+        return self._user_tag_preferences
+
+    def get_tag_preferences_for_user(self, user_id: int) -> Dict[str, float]:
+        preferences = self.get_tag_preferences()
+        return preferences.get(int(user_id), {})
+
+    def get_profiles(self) -> Dict[int, Dict[str, Optional[str]]]:
+        self.ensure_fresh()
+        return self._user_profiles
+
+
 def _detect_device_type(user_agent: str) -> str:
     if not user_agent:
         return "unknown"
@@ -242,6 +325,67 @@ def _start_experiment_watcher(config_path: Path) -> Optional[Observer]:
     except OSError as exc:
         LOGGER.warning("Unable to watch experiment config %s: %s", config_path, exc)
     return None
+
+
+def _load_channel_weight_overrides() -> Dict[str, float]:
+    path = MODELS_DIR / "channel_weights.json"
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text())
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.warning("Failed to parse channel weight artifact %s: %s", path, exc)
+        return {}
+    weights = payload.get("weights") if isinstance(payload, dict) else None
+    if not isinstance(weights, dict):
+        LOGGER.warning("Channel weight artifact missing 'weights' key; ignoring.")
+        return {}
+    normalized: Dict[str, float] = {}
+    for key, value in weights.items():
+        try:
+            normalized[str(key)] = float(value)
+        except (TypeError, ValueError):
+            continue
+    return normalized
+
+
+def _get_channel_weight_baseline(state) -> Dict[str, float]:
+    overrides = getattr(state, "channel_weights", None)
+    weights = DEFAULT_CHANNEL_WEIGHTS.copy()
+    if overrides:
+        for channel, value in overrides.items():
+            try:
+                weights[channel] = float(value)
+            except (TypeError, ValueError):
+                continue
+    return weights
+
+
+def _get_user_data_manager(state) -> Optional[HotUserData]:
+    return getattr(state, "user_data", None)
+
+
+def _get_user_history_records(state, user_id: int) -> Optional[List[Dict[str, float]]]:
+    manager = _get_user_data_manager(state)
+    if manager:
+        return manager.get_history_for_user(int(user_id))
+    history = getattr(state, "user_history", {})
+    return history.get(int(user_id))
+
+
+def _get_user_tag_preferences(state, user_id: int) -> Dict[str, float]:
+    manager = _get_user_data_manager(state)
+    if manager:
+        return manager.get_tag_preferences_for_user(int(user_id))
+    preferences = getattr(state, "user_tag_preferences", {})
+    return preferences.get(int(user_id), {})
+
+
+def _get_user_history_sets(state) -> Dict[int, Set[int]]:
+    manager = _get_user_data_manager(state)
+    if manager:
+        return manager.get_history_sets()
+    return getattr(state, "user_history_sets", {})
 
 
 @app.middleware("http")
@@ -1073,6 +1217,32 @@ def _create_feature_store() -> Optional[RedisFeatureStore]:
         return None
 
 
+def _fetch_dataset_features_from_store(
+    feature_store: Optional[RedisFeatureStore],
+    dataset_ids: List[int],
+) -> Dict[int, Dict[str, Any]]:
+    if not feature_store or not dataset_ids:
+        return {}
+    try:
+        return feature_store.get_batch_dataset_features(dataset_ids)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.warning("Feature store dataset fetch failed: %s", exc)
+        return {}
+
+
+def _fetch_dataset_stats_from_store(
+    feature_store: Optional[RedisFeatureStore],
+    dataset_ids: List[int],
+) -> Dict[int, Dict[str, Any]]:
+    if not feature_store or not dataset_ids:
+        return {}
+    try:
+        return feature_store.get_dataset_stats(dataset_ids)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.warning("Feature store stats fetch failed: %s", exc)
+        return {}
+
+
 async def _call_blocking(
     func: Callable,
     *args,
@@ -1205,7 +1375,7 @@ def _augment_with_multi_channel(
     # UserCF recall
     if user_id:
         user_similarity = recall.get("user_similarity", {})
-        history_sets = getattr(state, "user_history_sets", {})
+        history_sets = _get_user_history_sets(state)
         if user_similarity and user_id in user_similarity:
             target_history = history_sets.get(int(user_id), set())
             similar_users = user_similarity.get(int(user_id), [])
@@ -1293,6 +1463,57 @@ def _combine_scores_with_weights(
     return scores, reasons
 
 
+def _compute_dynamic_channel_weights(
+    base_weights: Dict[str, float],
+    *,
+    dataset_id: int,
+    user_id: Optional[int],
+    bundle: ModelBundle,
+    state,
+) -> Dict[str, float]:
+    """Adjust channel weights based on available signals for this request."""
+    adjusted = {key: max(float(value), 0.0) for key, value in base_weights.items()}
+
+    def _shift(source: str, targets: List[str], fraction: float) -> None:
+        current = adjusted.get(source, 0.0)
+        if current <= 0 or not targets or fraction <= 0:
+            return
+        amount = current * min(fraction, 1.0)
+        adjusted[source] = max(current - amount, 0.0)
+        share = amount / len(targets)
+        for target in targets:
+            adjusted[target] = max(adjusted.get(target, 0.0) + share, 0.0)
+
+    def _boost(target: str, amount: float) -> None:
+        if amount <= 0:
+            return
+        adjusted[target] = max(adjusted.get(target, 0.0) + amount, 0.0)
+
+    user_history = _get_user_history_records(state, user_id) if user_id else None
+    if not user_history:
+        # No personalization history → rely more on content/vector/popular
+        _shift("behavior", ["content", "vector", "popular"], 0.5)
+
+    behavior_neighbors = bundle.behavior.get(dataset_id) or {}
+    if len(behavior_neighbors) < 3:
+        _shift("behavior", ["content", "vector"], 0.3)
+
+    content_neighbors = bundle.content.get(dataset_id) or {}
+    if len(content_neighbors) < 3:
+        _shift("content", ["behavior", "vector"], 0.3)
+
+    vector_entries = bundle.vector.get(dataset_id) or []
+    if not vector_entries:
+        _shift("vector", ["behavior", "content"], 0.5)
+    elif len(vector_entries) < 5:
+        _boost("vector", 0.1)
+
+    if not state.dataset_tags.get(dataset_id):
+        _shift("content", ["behavior", "vector"], 0.2)
+
+    return adjusted
+
+
 def _normalize_event_time(value: Any) -> Optional[datetime]:
     """Convert different timestamp representations to timezone-aware UTC datetimes."""
     if value is None:
@@ -1344,7 +1565,7 @@ def _apply_personalization(
     """
     if not user_id:
         return
-    user_history = state.user_history.get(int(user_id))
+    user_history = _get_user_history_records(state, int(user_id))
     if not user_history:
         return
 
@@ -1358,7 +1579,7 @@ def _apply_personalization(
         scores.pop(dataset_id, None)
         reasons.pop(dataset_id, None)
 
-    tag_pref = state.user_tag_preferences.get(int(user_id), {})
+    tag_pref = _get_user_tag_preferences(state, int(user_id))
 
     # Apply time-decayed personalization boost
     for dataset_id in list(scores.keys()):
@@ -1411,6 +1632,7 @@ def _compute_ranking_features(
     raw_features: pd.DataFrame,
     dataset_stats: pd.DataFrame,
     slot_metrics_aggregated: pd.DataFrame,
+    feature_store: Optional[RedisFeatureStore] = None,
 ) -> pd.DataFrame:
     if not dataset_ids:
         return pd.DataFrame()
@@ -1426,6 +1648,18 @@ def _compute_ranking_features(
         selected["description"] = selected.get("description", "").fillna("").astype(str)
         selected["tag"] = selected.get("tag", "").fillna("").astype(str)
 
+    realtime_features = _fetch_dataset_features_from_store(feature_store, dataset_ids)
+    if realtime_features:
+        store_df = pd.DataFrame.from_dict(realtime_features, orient="index")
+        store_df.index = store_df.index.astype(int)
+        store_df = store_df.reindex(dataset_ids)
+        for column in store_df.columns:
+            store_series = store_df[column]
+            if column in selected.columns:
+                selected[column] = store_series.combine_first(selected[column])
+            else:
+                selected[column] = store_series
+
     selected["description_length"] = selected.get("description", "").str.len().astype(float)
     selected["tag_count"] = selected.get("tag", "").apply(
         lambda text: float(len([t for t in text.split(';') if t.strip()])) if isinstance(text, str) else 0.0
@@ -1439,6 +1673,18 @@ def _compute_ranking_features(
         stats = dataset_stats.set_index("dataset_id").reindex(dataset_ids)
         stats["interaction_count"] = pd.to_numeric(stats.get("interaction_count"), errors="coerce").fillna(0.0)
         stats["total_weight"] = pd.to_numeric(stats.get("total_weight"), errors="coerce").fillna(0.0)
+
+    realtime_stats = _fetch_dataset_stats_from_store(feature_store, dataset_ids)
+    if realtime_stats:
+        stats_updates = pd.DataFrame.from_dict(realtime_stats, orient="index")
+        stats_updates.index = stats_updates.index.astype(int)
+        stats_updates = stats_updates.reindex(dataset_ids)
+        for column in stats_updates.columns:
+            store_series = pd.to_numeric(stats_updates[column], errors="coerce")
+            if column in stats.columns:
+                stats[column] = store_series.combine_first(stats[column])
+            else:
+                stats[column] = store_series.fillna(0.0)
 
     features = pd.DataFrame(index=dataset_ids)
     features["price_log"] = np.log1p(selected["price"].clip(lower=0.0))
@@ -1556,12 +1802,19 @@ def _apply_ranking(
     raw_features: pd.DataFrame,
     dataset_stats: pd.DataFrame,
     slot_metrics_aggregated: pd.DataFrame,
+    feature_store: Optional[RedisFeatureStore] = None,
 ) -> None:
     if rank_model is None or not scores:
         return
 
     dataset_ids = list(scores.keys())
-    features = _compute_ranking_features(dataset_ids, raw_features, dataset_stats, slot_metrics_aggregated)
+    features = _compute_ranking_features(
+        dataset_ids,
+        raw_features,
+        dataset_stats,
+        slot_metrics_aggregated,
+        feature_store=feature_store,
+    )
     if features.empty:
         return
 
@@ -1704,6 +1957,10 @@ def load_models() -> None:
     user_history = _load_user_history()
     user_profiles = _load_user_profile()
     user_tag_preferences = _build_user_tag_preferences(user_history, dataset_tags)
+    channel_weight_overrides = _load_channel_weight_overrides()
+    hot_user_ttl = int(os.getenv("HOT_USER_DATA_TTL_SECONDS", "300"))
+    user_data_manager = HotUserData(dataset_tags, ttl_seconds=hot_user_ttl)
+    user_data_manager.bootstrap(user_history, user_profiles)
 
     _set_bundle(app.state, bundle, prefix="")
     app.state.shadow_bundle = None
@@ -1713,7 +1970,9 @@ def load_models() -> None:
     app.state.dataset_tags = dataset_tags
     app.state.dataset_stats = dataset_stats
     app.state.slot_metrics_aggregated = slot_metrics_aggregated
-    app.state.user_history = user_history
+    app.state.channel_weights = channel_weight_overrides or {}
+    app.state.user_data = user_data_manager
+    app.state.user_history = user_history  # Backward compatibility
     app.state.user_profiles = user_profiles
     app.state.user_tag_preferences = user_tag_preferences
     app.state.personalization_history_limit = 20
@@ -1722,10 +1981,7 @@ def load_models() -> None:
     app.state.models_loaded = True
 
     app.state.recall_indices = _load_recall_artifacts(MODELS_DIR)
-    app.state.user_history_sets = {
-        user_id: {record["dataset_id"] for record in records}
-        for user_id, records in user_history.items()
-    }
+    app.state.user_history_sets = user_data_manager.get_history_sets()
 
     # Initialize fallback strategy
     precomputed_dir = MODELS_DIR / "precomputed"
@@ -1929,7 +2185,8 @@ async def get_similar(
     metrics_tracker = get_metrics_tracker()
     state = _get_app_state()
     cache = getattr(state, "cache", None)
-    channel_weights = DEFAULT_CHANNEL_WEIGHTS.copy()
+    channel_weights = _get_channel_weight_baseline(state)
+    applied_channel_weights = channel_weights
 
     # 设置 Sentry 上下文
     set_request_context(
@@ -1968,8 +2225,15 @@ async def get_similar(
                     return response
                 metrics_tracker.track_cache_miss()
 
-        async def _compute() -> tuple[List[RecommendationItem], Dict[int, str], str, Optional[str]]:
+        async def _compute() -> tuple[List[RecommendationItem], Dict[int, str], str, Optional[str], Dict[str, float]]:
             local_bundle, local_variant = _choose_bundle(state)
+            effective_weights = _compute_dynamic_channel_weights(
+                channel_weights,
+                dataset_id=dataset_id,
+                user_id=None,
+                bundle=local_bundle,
+                state=state,
+            )
             scores, reasons = _combine_scores_with_weights(
                 dataset_id,
                 local_bundle.behavior,
@@ -1977,7 +2241,7 @@ async def get_similar(
                 local_bundle.vector,
                 local_bundle.popular,
                 limit,
-                channel_weights,
+                effective_weights,
             )
             _augment_with_multi_channel(
                 state,
@@ -1994,6 +2258,7 @@ async def get_similar(
                 state.raw_features,
                 state.dataset_stats,
                 state.slot_metrics_aggregated,
+                state.feature_store,
                 endpoint=endpoint,
                 operation="model_inference",
                 timeout=TimeoutManager.get_timeout("model_inference"),
@@ -2004,10 +2269,10 @@ async def get_similar(
                 apply_mmr=True,
                 mmr_lambda=0.7
             )
-            return items, reasons, local_variant, local_bundle.run_id
+            return items, reasons, local_variant, local_bundle.run_id, effective_weights
 
         try:
-            items, reasons, variant, run_id = await asyncio.wait_for(
+            items, reasons, variant, run_id, applied_channel_weights = await asyncio.wait_for(
                 _compute(),
                 timeout=TimeoutManager.get_timeout("recommendation_total"),
             )
@@ -2098,7 +2363,7 @@ async def get_similar(
             variant=variant,
             experiment_variant=None,
             degrade_reason=degrade_reason,
-            channel_weights=channel_weights,
+            channel_weights=applied_channel_weights,
         )
 
         _log_exposure(
@@ -2176,7 +2441,8 @@ async def recommend_for_detail(
         user_id=user_id,
         request_id=request_id,
     )
-    channel_weights = DEFAULT_CHANNEL_WEIGHTS.copy()
+    channel_weights = _get_channel_weight_baseline(state)
+    applied_channel_weights = channel_weights
     for key, value in experiment_params.items():
         if key.endswith("_weight"):
             channel = key.replace("_weight", "")
@@ -2216,10 +2482,23 @@ async def recommend_for_detail(
                         await _run_in_executor(hot_tracker.track_view, dataset_id)
                     return RecommendationResponse(**cached_result)
 
-        async def _compute() -> tuple[List[RecommendationItem], Dict[int, str], str, Optional[str]]:
+        async def _compute() -> tuple[List[RecommendationItem], Dict[int, str], str, Optional[str], Dict[str, float]]:
             local_bundle, local_variant = _choose_bundle(state)
-            scores, reasons = _combine_scores(
-                dataset_id, local_bundle.behavior, local_bundle.content, local_bundle.vector, local_bundle.popular, limit
+            effective_weights = _compute_dynamic_channel_weights(
+                channel_weights,
+                dataset_id=dataset_id,
+                user_id=user_id,
+                bundle=local_bundle,
+                state=state,
+            )
+            scores, reasons = _combine_scores_with_weights(
+                dataset_id,
+                local_bundle.behavior,
+                local_bundle.content,
+                local_bundle.vector,
+                local_bundle.popular,
+                limit,
+                effective_weights,
             )
             _apply_personalization(
                 user_id,
@@ -2245,6 +2524,7 @@ async def recommend_for_detail(
                 state.raw_features,
                 state.dataset_stats,
                 state.slot_metrics_aggregated,
+                state.feature_store,
                 endpoint=endpoint,
                 operation="model_inference",
                 timeout=TimeoutManager.get_timeout("model_inference"),
@@ -2255,10 +2535,10 @@ async def recommend_for_detail(
                 apply_mmr=True,
                 mmr_lambda=0.7
             )
-            return items, reasons, local_variant, local_bundle.run_id
+            return items, reasons, local_variant, local_bundle.run_id, effective_weights
 
         try:
-            items, reasons, variant, run_id = await asyncio.wait_for(
+            items, reasons, variant, run_id, applied_channel_weights = await asyncio.wait_for(
                 _compute(),
                 timeout=TimeoutManager.get_timeout("recommendation_total"),
             )
@@ -2365,7 +2645,7 @@ async def recommend_for_detail(
             variant=variant,
             experiment_variant=experiment_variant,
             degrade_reason=degrade_reason,
-            channel_weights=channel_weights,
+            channel_weights=applied_channel_weights,
         )
 
         _log_exposure(
