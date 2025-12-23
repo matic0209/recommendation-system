@@ -6,12 +6,19 @@ x-env-file-prod: &prod-env
     - .env.prod
 
 services:
+  # MLflow tracking server
+  mlflow:
+    <<: *prod-env
+
+  # Recommendation API service
   recommendation-api:
     <<: *prod-env
 
+  # Report viewer service
   report-viewer:
     <<: *prod-env
 
+  # Airflow services
   airflow-init:
     <<: *prod-env
 
@@ -21,5 +28,6 @@ services:
   airflow-scheduler:
     <<: *prod-env
 
+  # Notification gateway
   notification-gateway:
     <<: *prod-env
