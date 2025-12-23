@@ -422,20 +422,20 @@ def _export_table_from_json(
     mode = "full"
     incremental_column = None
     last_watermark = table_state.get("watermark") if table_state else None
-    files_to_process = []
+    files_to_process: list[Path] = []
 
     full_file = json_dir / f"{table}.json"
 
     if full_refresh or not last_watermark:
-        # Full refresh: only load the main file
+        mode = "full" if full_refresh else "bootstrap"
         if full_file.exists():
-            files_to_process = [full_file]
-            mode = "full" if full_refresh else "bootstrap"
+            files_to_process.append(full_file)
         else:
-            LOGGER.warning("Full file not found: %s", full_file)
-            return ExtractionResult(mode="error", row_count=0, partition_path=None, watermark=None, incremental_column=None)
+            LOGGER.warning("Full file not found for table '%s': %s", table, full_file)
+        incremental_files = _find_incremental_json_files(json_dir, table, None)
+        if incremental_files:
+            files_to_process.extend(incremental_files)
     else:
-        # Incremental: find files newer than watermark
         incremental_files = _find_incremental_json_files(json_dir, table, last_watermark)
         if incremental_files:
             files_to_process = incremental_files
@@ -445,8 +445,8 @@ def _export_table_from_json(
             return ExtractionResult(mode="incremental", row_count=0, partition_path=None, watermark=last_watermark, incremental_column=None)
 
     if not files_to_process:
-        LOGGER.info("No files to process for table '%s'", table)
-        return ExtractionResult(mode=mode, row_count=0, partition_path=None, watermark=last_watermark, incremental_column=None)
+        LOGGER.warning("No JSON files found for table '%s' in %s", table, json_dir)
+        return ExtractionResult(mode="error", row_count=0, partition_path=None, watermark=last_watermark, incremental_column=None)
 
     LOGGER.info(
         "Loading table '%s' (mode=%s, files=%d, watermark=%s)",
