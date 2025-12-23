@@ -10,11 +10,25 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Iterable, List, Tuple, Optional
 
+# Load .env file if running outside Docker (for development/testing)
+try:
+    from dotenv import load_dotenv
+    # Load .env from project root
+    project_root = Path(__file__).parent.parent
+    env_file = project_root / ".env"
+    if env_file.exists():
+        load_dotenv(env_file, override=False)  # Don't override existing env vars
+except ImportError:
+    pass  # dotenv not installed, rely on system env vars
+
 # IMPORTANT: Set HF_ENDPOINT before importing any HuggingFace libraries
 # This ensures the mirror is used for all model downloads
 if os.getenv("HF_ENDPOINT"):
-    os.environ["HF_ENDPOINT"] = os.getenv("HF_ENDPOINT")
-    logging.info("HuggingFace endpoint set to: %s", os.environ["HF_ENDPOINT"])
+    hf_endpoint = os.getenv("HF_ENDPOINT")
+    # Set multiple env vars for compatibility with different HF versions
+    os.environ["HF_ENDPOINT"] = hf_endpoint
+    os.environ["HUGGINGFACE_HUB_ENDPOINT"] = hf_endpoint  # Legacy support
+    print(f"[INFO] HuggingFace endpoint set to: {hf_endpoint}")  # Use print since logging not configured yet
 
 import mlflow
 import numpy as np
