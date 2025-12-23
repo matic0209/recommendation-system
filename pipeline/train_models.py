@@ -46,7 +46,7 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler, normalize
 
 try:
-    from lightgbm import LGBMClassifier, LGBMRegressor
+    from lightgbm import LGBMClassifier, LGBMRegressor, LGBMRanker
     from lightgbm import early_stopping
 
     LIGHTGBM_AVAILABLE = True
