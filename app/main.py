@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
+from datetime import datetime, timezone
 
 import numpy as np
 import pandas as pd
@@ -207,6 +208,40 @@ def _extract_request_context(request: Request) -> Dict[str, str]:
         "locale": locale,
         "client_app": client_app,
     }
+
+
+def _resolve_experiment_config_path() -> Path:
+    """Resolve experiment config path from ENV or default repository location."""
+    env_path = os.getenv("EXPERIMENT_CONFIG_PATH")
+    if not env_path:
+        return (BASE_DIR / "config" / "experiments.yaml").resolve()
+    candidate = Path(env_path).expanduser()
+    if candidate.is_absolute():
+        return candidate.resolve()
+    return (BASE_DIR / candidate).resolve()
+
+
+def _start_experiment_watcher(config_path: Path) -> Optional[Observer]:
+    """Start watchdog observer for experiment config if directory exists."""
+    watch_dir = config_path.parent
+    if not watch_dir.exists():
+        LOGGER.warning(
+            "Experiment config directory %s does not exist; automatic reload disabled.",
+            watch_dir,
+        )
+        return None
+
+    observer = Observer()
+    handler = ExperimentFileHandler(config_path)
+    try:
+        observer.schedule(handler, watch_dir.as_posix(), recursive=False)
+        observer.daemon = True
+        observer.start()
+        LOGGER.info("Watching %s for experiment updates", config_path)
+        return observer
+    except OSError as exc:
+        LOGGER.warning("Unable to watch experiment config %s: %s", config_path, exc)
+    return None
 
 
 @app.middleware("http")
@@ -1258,6 +1293,34 @@ def _combine_scores_with_weights(
     return scores, reasons
 
 
+def _normalize_event_time(value: Any) -> Optional[datetime]:
+    """Convert different timestamp representations to timezone-aware UTC datetimes."""
+    if value is None:
+        return None
+    parsed: Optional[datetime]
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            try:
+                parsed = datetime.fromtimestamp(float(text), tz=timezone.utc)
+            except (ValueError, TypeError):
+                return None
+    elif isinstance(value, (int, float)):
+        parsed = datetime.fromtimestamp(float(value), tz=timezone.utc)
+    elif isinstance(value, datetime):
+        parsed = value
+    else:
+        return None
+
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
 def _apply_personalization(
     user_id: Optional[int],
     scores: Dict[int, float],
@@ -1285,8 +1348,7 @@ def _apply_personalization(
     if not user_history:
         return
 
-    import datetime
-    now = datetime.datetime.now()
+    now = datetime.now(timezone.utc)
 
     recent_history = user_history[:history_limit]
     history_ids = {record["dataset_id"] for record in recent_history}
@@ -1306,17 +1368,10 @@ def _apply_personalization(
 
             # Calculate time decay factor
             timestamp = record.get("last_event_time")
-            if timestamp:
-                try:
-                    # Handle both datetime and timestamp formats
-                    if isinstance(timestamp, str):
-                        event_time = datetime.datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
-                    else:
-                        event_time = timestamp
-                    days_ago = (now - event_time).total_seconds() / 86400  # seconds to days
-                    decay_factor = 0.5 ** (days_ago / decay_half_life_days)
-                except (ValueError, AttributeError):
-                    decay_factor = 1.0  # Fallback if timestamp parsing fails
+            event_time = _normalize_event_time(timestamp)
+            if event_time:
+                days_ago = (now - event_time).total_seconds() / 86400  # seconds to days
+                decay_factor = 0.5 ** (days_ago / decay_half_life_days)
             else:
                 decay_factor = 1.0  # No decay if timestamp not available
             weight = record.get("weight", 1.0)
@@ -1331,11 +1386,15 @@ def _apply_personalization(
             tag_boost = sum(tag_pref.get(tag, 0.0) for tag in candidate_tags)
             # Use average decay factor from recent history
             if recent_history:
-                avg_decay = sum(
-                    0.5 ** ((now - rec.get("last_event_time", now)).total_seconds() / 86400 / decay_half_life_days)
-                    if rec.get("last_event_time") else 1.0
-                    for rec in recent_history[:5]  # Consider top 5 recent
-                ) / min(5, len(recent_history))
+                decay_samples = []
+                for rec in recent_history[:5]:
+                    event_time = _normalize_event_time(rec.get("last_event_time"))
+                    if event_time:
+                        delta_days = (now - event_time).total_seconds() / 86400
+                        decay_samples.append(0.5 ** (delta_days / decay_half_life_days))
+                    else:
+                        decay_samples.append(1.0)
+                avg_decay = sum(decay_samples) / len(decay_samples)
             else:
                 avg_decay = 1.0
             boost += tag_boost * avg_decay * 0.2
@@ -1622,18 +1681,13 @@ def load_models() -> None:
     dataset_ids = _collect_dataset_ids(bundle)
     feature_store = _create_feature_store()
     app.state.feature_store = feature_store
-    experiment_config_path = Path(os.getenv("EXPERIMENT_CONFIG_PATH", BASE_DIR / "config" / "experiments.yaml")).resolve()
+    experiment_config_path = _resolve_experiment_config_path()
     app.state.experiments = load_experiments(experiment_config_path)
     existing_observer = getattr(app.state, "experiment_observer", None)
     if existing_observer:
         existing_observer.stop()
         existing_observer.join(timeout=2)
-    experiment_handler = ExperimentFileHandler(experiment_config_path)
-    experiment_observer = Observer()
-    experiment_observer.schedule(experiment_handler, experiment_config_path.parent.as_posix(), recursive=False)
-    experiment_observer.daemon = True
-    experiment_observer.start()
-    app.state.experiment_observer = experiment_observer
+    app.state.experiment_observer = _start_experiment_watcher(experiment_config_path)
     app.state.experiment_config_path = experiment_config_path
 
     metadata, dataset_tags, raw_features = _load_dataset_metadata(
