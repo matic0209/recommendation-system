@@ -449,6 +449,16 @@ def _load_exposure_log() -> pd.DataFrame:
             degrade_reason = context.get("degrade_reason")
             model_run_id = context.get("model_run_id")
             feature_snapshot_id = context.get("feature_snapshot_id")
+            source = context.get("source")
+            device_type = context.get("device_type")
+            locale = context.get("locale")
+            client_app = context.get("client_app")
+            channel_weights = context.get("channel_weights")
+            if isinstance(channel_weights, dict):
+                try:
+                    channel_weights = json.dumps(channel_weights, ensure_ascii=False)
+                except Exception:
+                    channel_weights = None
 
             for idx, item in enumerate(items):
                 dataset_id = item.get("dataset_id")
@@ -473,6 +483,11 @@ def _load_exposure_log() -> pd.DataFrame:
                     "degrade_reason": degrade_reason,
                     "model_run_id": model_run_id,
                     "feature_snapshot_id": feature_snapshot_id,
+                    "source": source,
+                    "device_type": device_type,
+                    "locale": locale,
+                    "client_app": client_app,
+                    "channel_weights": channel_weights,
                     "dataset_id": dataset_id,
                     "score": score,
                     "reason": item.get("reason"),
@@ -486,6 +501,7 @@ def _load_exposure_log() -> pd.DataFrame:
             "request_id", "algorithm_version", "user_id", "page_id",
             "endpoint", "variant", "experiment_variant", "degrade_reason",
             "model_run_id", "feature_snapshot_id",
+            "source", "device_type", "locale", "client_app", "channel_weights",
             "dataset_id", "score", "reason", "timestamp", "position"
         ])
 

@@ -293,6 +293,18 @@ def _extract_request_context(request: Request) -> Dict[str, str]:
     }
 
 
+def _compute_mmr_lambda(*, endpoint: str, request_context: Optional[Dict[str, str]]) -> float:
+    base = 0.7 if endpoint == "recommend_detail" else 0.5
+    context = request_context or {}
+    source = context.get("source")
+    if source in {"search", "landing"}:
+        base = 0.5
+    device = context.get("device_type")
+    if device == "mobile":
+        base = min(base + 0.1, 0.85)
+    return base
+
+
 def _resolve_experiment_config_path() -> Path:
     """Resolve experiment config path from ENV or default repository location."""
     env_path = os.getenv("EXPERIMENT_CONFIG_PATH")
@@ -386,6 +398,26 @@ def _get_user_history_sets(state) -> Dict[int, Set[int]]:
     if manager:
         return manager.get_history_sets()
     return getattr(state, "user_history_sets", {})
+
+
+def _get_user_features(state, user_id: Optional[int]) -> Dict[str, float]:
+    if not user_id:
+        return {}
+    feature_store = getattr(state, "feature_store", None)
+    if not feature_store:
+        return {}
+    try:
+        raw = feature_store.get_user_features(int(user_id))
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.warning("Failed to fetch user features for %s: %s", user_id, exc)
+        return {}
+    normalized: Dict[str, float] = {}
+    for key, value in raw.items():
+        try:
+            normalized[f"user_{key}"] = float(value)
+        except (TypeError, ValueError):
+            continue
+    return normalized
 
 
 @app.middleware("http")
@@ -504,10 +536,12 @@ def _load_rank_model(path: Path) -> Optional[Pipeline]:
         except Exception as exc:  # noqa: BLE001
             LOGGER.error("Failed to load ranking model: %s", exc)
             return None
-    if not isinstance(model, Pipeline):
-        LOGGER.warning("Ranking artifact at %s is not a sklearn Pipeline", path)
-        return None
-    return model
+    if isinstance(model, Pipeline):
+        return model
+    if isinstance(model, dict) and model.get("type") == "lightgbm_ranker":
+        return model
+    LOGGER.warning("Ranking artifact at %s has unexpected type %s", path, type(model))
+    return None
 
 
 def _load_dataset_stats(
@@ -1542,6 +1576,21 @@ def _normalize_event_time(value: Any) -> Optional[datetime]:
     return parsed.astimezone(timezone.utc)
 
 
+def _extract_channel_from_reason(reason: Optional[str]) -> str:
+    if not reason:
+        return "unknown"
+    text = str(reason).strip().lower()
+    if not text:
+        return "unknown"
+    parts = [token for token in text.split("+") if token]
+    if not parts:
+        return "unknown"
+    channel = parts[0]
+    if channel.startswith("fallback"):
+        return "fallback"
+    return channel
+
+
 def _apply_personalization(
     user_id: Optional[int],
     scores: Dict[int, float],
@@ -1633,6 +1682,15 @@ def _compute_ranking_features(
     dataset_stats: pd.DataFrame,
     slot_metrics_aggregated: pd.DataFrame,
     feature_store: Optional[RedisFeatureStore] = None,
+    *,
+    scores: Optional[Dict[int, float]] = None,
+    reasons: Optional[Dict[int, str]] = None,
+    channel_weights: Optional[Dict[str, float]] = None,
+    endpoint: str = "recommend_detail",
+    variant: str = "primary",
+    experiment_variant: Optional[str] = None,
+    request_context: Optional[Dict[str, str]] = None,
+    user_features: Optional[Dict[str, float]] = None,
 ) -> pd.DataFrame:
     if not dataset_ids:
         return pd.DataFrame()
@@ -1768,24 +1826,109 @@ def _compute_ranking_features(
         if col in selected.columns:
             features[col] = pd.to_numeric(selected[col], errors="coerce").fillna(0.0)
 
+    # Request-level dynamic features
+    score_lookup = scores or {}
+    reason_lookup = reasons or {}
+    context = request_context or {}
+    channel_weights = channel_weights or {}
+
+    if dataset_ids:
+        sorted_scores = sorted(score_lookup.items(), key=lambda kv: kv[1], reverse=True)
+        position_lookup = {dataset_id: idx for idx, (dataset_id, _) in enumerate(sorted_scores)}
+    else:
+        position_lookup = {}
+
+    features["score"] = features.index.to_series().map(lambda dataset_id: float(score_lookup.get(dataset_id, 0.0))).values
+    features["position"] = features.index.to_series().map(lambda dataset_id: position_lookup.get(dataset_id, -1)).fillna(-1).astype(int)
+
+    def _reason_channel(dataset_id: int) -> str:
+        return _extract_channel_from_reason(reason_lookup.get(dataset_id))
+
+    features["channel"] = features.index.to_series().map(_reason_channel).fillna("unknown").astype(str)
+
+    def _channel_weight(channel: str) -> float:
+        if channel in channel_weights:
+            try:
+                return float(channel_weights[channel])
+            except (TypeError, ValueError):
+                return DEFAULT_CHANNEL_WEIGHTS.get(channel, 0.1)
+        return DEFAULT_CHANNEL_WEIGHTS.get(channel, 0.1)
+
+    features["channel_weight"] = features["channel"].map(_channel_weight).astype(float)
+
+    features["endpoint"] = endpoint or context.get("endpoint", "recommend_detail")
+    features["variant"] = variant or context.get("variant", "primary")
+    features["experiment_variant"] = (experiment_variant or context.get("experiment_variant") or "control")
+    features["source"] = context.get("source", "unknown")
+    features["device_type"] = context.get("device_type", "unknown")
+    features["locale"] = context.get("locale", "unknown")
+
+    user_features = user_features or {}
+    for key, value in user_features.items():
+        try:
+            features[key] = float(value)
+        except (TypeError, ValueError):
+            features[key] = 0.0
+
     return features
+
+
+def _prepare_ranker_features(rank_model, features: pd.DataFrame) -> pd.DataFrame:
+    if not isinstance(rank_model, dict):
+        return features
+    required_columns = rank_model.get("feature_columns") or list(features.columns)
+    feature_types = rank_model.get("feature_types", {})
+    category_mappings = rank_model.get("category_mappings", {})
+
+    working = features.copy()
+    for column, kind in feature_types.items():
+        if column not in working.columns:
+            if kind == "categorical":
+                working[column] = "unknown"
+            else:
+                working[column] = 0.0
+        if kind == "numeric":
+            working[column] = pd.to_numeric(working[column], errors="coerce").fillna(0.0)
+        else:
+            working[column] = working[column].fillna("unknown").astype(str)
+
+    for column, categories in category_mappings.items():
+        if column in working.columns:
+            working[column] = pd.Categorical(working[column].astype(str), categories=categories)
+
+    return working[required_columns] if required_columns else working
+
+
+def _predict_rank_scores(rank_model, features: pd.DataFrame) -> pd.Series:
+    if rank_model is None or features.empty:
+        return pd.Series(dtype=float)
+    try:
+        if isinstance(rank_model, dict) and rank_model.get("type") == "lightgbm_ranker":
+            prepared = _prepare_ranker_features(rank_model, features)
+            scores = rank_model["model"].predict(prepared)
+            return pd.Series(scores, index=features.index, dtype=float)
+        if hasattr(rank_model, "predict_proba"):
+            scores = rank_model.predict_proba(features)[:, 1]
+            return pd.Series(scores, index=features.index, dtype=float)
+        scores = rank_model.predict(features)
+        return pd.Series(scores, index=features.index, dtype=float)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.warning("Ranking model prediction failed: %s", exc)
+        return pd.Series(dtype=float)
 
 
 @with_circuit_breaker(failure_threshold=5, recovery_timeout=30)
 def _apply_ranking_with_circuit_breaker(
     scores: Dict[int, float],
     reasons: Dict[int, str],
-    rank_model: Pipeline,
+    rank_model,
     features: pd.DataFrame,
 ) -> None:
     """Apply ranking with circuit breaker protection."""
-    # Support both classification (predict_proba) and regression (predict) models
-    if hasattr(rank_model, "predict_proba"):
-        probabilities = rank_model.predict_proba(features)[:, 1]
-    else:
-        probabilities = rank_model.predict(features)
-
-    for dataset_id, prob in zip(features.index.astype(int), probabilities):
+    probabilities = _predict_rank_scores(rank_model, features)
+    if probabilities.empty:
+        return
+    for dataset_id, prob in zip(features.index.astype(int), probabilities.values):
         if dataset_id not in scores:
             continue
         prob = float(prob)
@@ -1798,11 +1941,18 @@ def _apply_ranking_with_circuit_breaker(
 def _apply_ranking(
     scores: Dict[int, float],
     reasons: Dict[int, str],
-    rank_model: Optional[Pipeline],
+    rank_model,
     raw_features: pd.DataFrame,
     dataset_stats: pd.DataFrame,
     slot_metrics_aggregated: pd.DataFrame,
     feature_store: Optional[RedisFeatureStore] = None,
+    *,
+    endpoint: str,
+    variant: str,
+    experiment_variant: Optional[str],
+    request_context: Optional[Dict[str, str]],
+    channel_weights: Dict[str, float],
+    user_features: Optional[Dict[str, float]],
 ) -> None:
     if rank_model is None or not scores:
         return
@@ -1814,6 +1964,14 @@ def _apply_ranking(
         dataset_stats,
         slot_metrics_aggregated,
         feature_store=feature_store,
+        scores=scores,
+        reasons=reasons,
+        channel_weights=channel_weights,
+        endpoint=endpoint,
+        variant=variant,
+        experiment_variant=experiment_variant,
+        request_context=request_context,
+        user_features=user_features,
     )
     if features.empty:
         return
@@ -2250,6 +2408,7 @@ async def get_similar(
                 reasons=reasons,
                 limit=limit,
             )
+            user_feature_map: Dict[str, float] = {}
             await _call_blocking(
                 _apply_ranking,
                 scores,
@@ -2262,12 +2421,18 @@ async def get_similar(
                 endpoint=endpoint,
                 operation="model_inference",
                 timeout=TimeoutManager.get_timeout("model_inference"),
+                variant=local_variant,
+                experiment_variant=None,
+                request_context=request_context,
+                channel_weights=effective_weights,
+                user_features=user_feature_map,
             )
+            mmr_lambda = _compute_mmr_lambda(endpoint=endpoint, request_context=request_context)
             items = _build_response_items(
                 scores, reasons, limit, state.metadata,
                 dataset_tags=state.dataset_tags,
                 apply_mmr=True,
-                mmr_lambda=0.7
+                mmr_lambda=mmr_lambda,
             )
             return items, reasons, local_variant, local_bundle.run_id, effective_weights
 
@@ -2516,6 +2681,7 @@ async def recommend_for_detail(
                 limit=limit,
                 user_id=user_id,
             )
+            user_feature_map = _get_user_features(state, user_id)
             await _call_blocking(
                 _apply_ranking,
                 scores,
@@ -2528,12 +2694,18 @@ async def recommend_for_detail(
                 endpoint=endpoint,
                 operation="model_inference",
                 timeout=TimeoutManager.get_timeout("model_inference"),
+                variant=local_variant,
+                experiment_variant=experiment_variant,
+                request_context=request_context,
+                channel_weights=effective_weights,
+                user_features=user_feature_map,
             )
+            mmr_lambda = _compute_mmr_lambda(endpoint=endpoint, request_context=request_context)
             items = _build_response_items(
                 scores, reasons, limit, state.metadata,
                 dataset_tags=state.dataset_tags,
                 apply_mmr=True,
-                mmr_lambda=0.7
+                mmr_lambda=mmr_lambda,
             )
             return items, reasons, local_variant, local_bundle.run_id, effective_weights
 

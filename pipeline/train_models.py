@@ -53,13 +53,7 @@ try:
 except ImportError:  # pragma: no cover - fallback when lightgbm missing
     LIGHTGBM_AVAILABLE = False
 
-try:
-    from skl2onnx import convert_sklearn
-    from skl2onnx.common.data_types import FloatTensorType
-
-    ONNX_AVAILABLE = True
-except ImportError:  # pragma: no cover
-    ONNX_AVAILABLE = False
+ONNX_AVAILABLE = False
 
 try:
     from sentence_transformers import SentenceTransformer
@@ -93,6 +87,8 @@ VECTOR_RECALL_K = 200
 IMAGE_SIMILARITY_WEIGHT = 0.4
 VECTOR_RECALL_PATH = MODELS_DIR / "item_recall_vector.json"
 RANK_MODEL_PATH = MODELS_DIR / "rank_model.pkl"
+RANKING_SAMPLES_PATH = PROCESSED_DIR / "ranking_training_samples.parquet"
+USER_FEATURES_PATH = PROCESSED_DIR / "user_features_v2.parquet"
 
 
 def _load_frame(path: Path) -> pd.DataFrame:
@@ -754,6 +750,218 @@ def _prepare_ranking_dataset(
     return meta, features, target, sample_weight, task_type
 
 
+def _load_ranking_samples() -> pd.DataFrame:
+    samples = _load_frame(RANKING_SAMPLES_PATH)
+    if samples.empty:
+        LOGGER.warning("Ranking training samples file missing or empty: %s", RANKING_SAMPLES_PATH)
+    return samples
+
+
+def _build_dataset_profile(
+    dataset_features: pd.DataFrame,
+    dataset_stats: pd.DataFrame,
+    slot_metrics: Optional[pd.DataFrame],
+) -> pd.DataFrame:
+    meta, features, _, _, _ = _prepare_ranking_dataset(
+        dataset_features,
+        dataset_stats,
+        labels=None,
+        slot_metrics=slot_metrics,
+    )
+    if features.empty:
+        return pd.DataFrame()
+    profile = meta.copy()
+    profile = profile.join(features)
+    return profile
+
+
+def _prepare_request_ranking_data(
+    samples: pd.DataFrame,
+    dataset_profile: pd.DataFrame,
+    user_features: pd.DataFrame,
+) -> Tuple[pd.DataFrame, pd.Series, List[int], Dict[str, List[str]]]:
+    if samples.empty or dataset_profile.empty:
+        return pd.DataFrame(), pd.Series(dtype=int), [], {}
+
+    working = samples.copy()
+    working = working.dropna(subset=["request_id", "dataset_id"])
+    working["dataset_id"] = working["dataset_id"].astype(int)
+
+    enriched = working.merge(dataset_profile, on="dataset_id", how="left")
+
+    if not user_features.empty and "user_id" in user_features.columns:
+        numeric_cols = [
+            col for col in user_features.columns
+            if col != "user_id" and pd.api.types.is_numeric_dtype(user_features[col])
+        ]
+        user_numeric = user_features[["user_id"] + numeric_cols].copy()
+        rename_map = {col: f"user_{col}" for col in numeric_cols}
+        user_numeric = user_numeric.rename(columns=rename_map)
+        enriched = enriched.merge(user_numeric, on="user_id", how="left")
+
+    enriched = enriched.sort_values(["request_id", "position"])
+    target = enriched["label"].fillna(0).astype(int)
+
+    numeric_features = [
+        "score",
+        "position",
+        "channel_weight",
+    ]
+    categorical_features = [
+        "channel",
+        "endpoint",
+        "variant",
+        "experiment_variant",
+        "source",
+        "device_type",
+        "locale",
+    ]
+
+    dataset_numeric_cols = [
+        col
+        for col in dataset_profile.columns
+        if col != "dataset_id" and pd.api.types.is_numeric_dtype(dataset_profile[col])
+    ]
+    numeric_features.extend(dataset_numeric_cols)
+
+    user_numeric_cols = [
+        col for col in enriched.columns if col.startswith("user_") and pd.api.types.is_numeric_dtype(enriched[col])
+    ]
+    numeric_features.extend(user_numeric_cols)
+
+    numeric_features = sorted(set(numeric_features))
+
+    for col in numeric_features:
+        if col not in enriched.columns:
+            enriched[col] = 0.0
+        enriched[col] = pd.to_numeric(enriched[col], errors="coerce").fillna(0.0)
+
+    for col in categorical_features:
+        if col not in enriched.columns:
+            enriched[col] = "unknown"
+        enriched[col] = enriched[col].fillna("unknown").astype(str)
+
+    feature_info = {
+        "numeric": numeric_features,
+        "categorical": categorical_features,
+    }
+
+    group_sizes = (
+        enriched.groupby("request_id")
+        .size()
+        .astype(int)
+        .tolist()
+    )
+
+    return enriched, target, group_sizes, feature_info
+
+
+def _train_lightgbm_ranker(
+    data: pd.DataFrame,
+    target: pd.Series,
+    group_sizes: List[int],
+    feature_info: Dict[str, List[str]],
+) -> Tuple[Optional[dict], Dict[str, float]]:
+    if data.empty or target.nunique() <= 1 or not LIGHTGBM_AVAILABLE:
+        LOGGER.warning("LightGBM ranking skipped (data empty or lightgbm unavailable).")
+        return None, {"name": "ndcg@10", "value": 0.0}
+
+    feature_columns = feature_info["numeric"] + feature_info["categorical"]
+    X = data[feature_columns].copy()
+
+    for col in feature_info["categorical"]:
+        X[col] = X[col].astype("category")
+
+    request_ids = data["request_id"].unique()
+    if len(request_ids) < 10:
+        train_ids = request_ids
+        valid_ids = []
+    else:
+        train_ids, valid_ids = train_test_split(
+            request_ids,
+            test_size=0.2,
+            random_state=42,
+        )
+
+    train_mask = data["request_id"].isin(train_ids)
+    valid_mask = data["request_id"].isin(valid_ids) if len(valid_ids) > 0 else None
+
+    X_train = X[train_mask]
+    y_train = target[train_mask]
+    group_train = (
+        data.loc[train_mask]
+        .groupby("request_id")
+        .size()
+        .astype(int)
+        .tolist()
+    )
+
+    eval_set = None
+    eval_group = None
+    if valid_mask is not None and valid_mask.any():
+        X_valid = X[valid_mask]
+        y_valid = target[valid_mask]
+        group_valid = (
+            data.loc[valid_mask]
+            .groupby("request_id")
+            .size()
+            .astype(int)
+            .tolist()
+        )
+        eval_set = [(X_valid, y_valid)]
+        eval_group = [group_valid]
+
+    model = LGBMRanker(
+        objective="lambdarank",
+        metric="ndcg",
+        n_estimators=int(os.getenv("RANKER_ESTIMATORS", "300")),
+        learning_rate=float(os.getenv("RANKER_LEARNING_RATE", "0.05")),
+        num_leaves=int(os.getenv("RANKER_NUM_LEAVES", "63")),
+        subsample=0.8,
+        colsample_bytree=0.8,
+        random_state=42,
+    )
+
+    fit_kwargs = {
+        "X": X_train,
+        "y": y_train,
+        "group": group_train,
+        "categorical_feature": feature_info["categorical"] or None,
+    }
+    if eval_set and eval_group:
+        fit_kwargs["eval_set"] = eval_set
+        fit_kwargs["eval_group"] = eval_group
+        fit_kwargs["eval_at"] = [5, 10]
+        fit_kwargs["callbacks"] = [early_stopping(stopping_rounds=30)]
+
+    model.fit(**fit_kwargs)
+
+    metric_value = 0.0
+    if eval_set and hasattr(model, "best_score_"):
+        metric_value = model.best_score_["valid_0"].get("ndcg@10", 0.0)
+
+    category_mappings = {}
+    for col in feature_info["categorical"]:
+        categories = list(X[col].cat.categories)
+        category_mappings[col] = categories
+
+    artifact = {
+        "type": "lightgbm_ranker",
+        "model": model,
+        "feature_columns": feature_columns,
+        "feature_types": {
+            **{col: "numeric" for col in feature_info["numeric"]},
+            **{col: "categorical" for col in feature_info["categorical"]},
+        },
+        "categorical_columns": feature_info["categorical"],
+        "category_mappings": category_mappings,
+        "trained_at": datetime.now(timezone.utc).isoformat(),
+        "user_feature_columns": [col for col in feature_info["numeric"] if col.startswith("user_")],
+    }
+    metric = {"name": "ndcg@10", "value": float(metric_value)}
+    return artifact, metric
+
+
 def _train_ranking_model(
     features: pd.DataFrame,
     target: pd.Series,
@@ -1009,19 +1217,50 @@ def main() -> None:
     LOGGER.info("Building popular items list...")
     popular_items = build_popular_items(interactions)
 
-    ranking_meta, ranking_features, ranking_target, ranking_weights, ranking_task = _prepare_ranking_dataset(
+    ranking_samples = _load_ranking_samples()
+    user_features = _load_frame(USER_FEATURES_PATH)
+    if not user_features.empty:
+        user_features = optimize_dataframe_memory(user_features)
+
+    dataset_profile = _build_dataset_profile(
         dataset_features,
         dataset_stats,
-        ranking_labels,
         slot_metrics,
     )
-    ranking_model, ranking_metric = _train_ranking_model(
-        ranking_features,
+    (
+        request_feature_frame,
         ranking_target,
-        ranking_weights,
-        ranking_task,
+        ranking_group_sizes,
+        ranking_feature_info,
+    ) = _prepare_request_ranking_data(
+        ranking_samples,
+        dataset_profile,
+        user_features,
     )
-    ranking_scores = _score_ranking_model(ranking_model, ranking_features)
+    ranking_model, ranking_metric = _train_lightgbm_ranker(
+        request_feature_frame,
+        ranking_target,
+        ranking_group_sizes,
+        ranking_feature_info,
+    )
+    if (
+        ranking_model
+        and not request_feature_frame.empty
+        and "model" in ranking_model
+    ):
+        try:
+            ranking_scores = pd.Series(
+                ranking_model["model"].predict(
+                    request_feature_frame[ranking_model["feature_columns"]]
+                ),
+                index=request_feature_frame.index,
+                dtype=float,
+            )
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("Failed to compute ranking preview scores: %s", exc)
+            ranking_scores = pd.Series(dtype=float)
+    else:
+        ranking_scores = pd.Series(dtype=float)
 
     behavior_path = MODELS_DIR / "item_sim_behavior.pkl"
     content_path = MODELS_DIR / "item_sim_content.pkl"
@@ -1065,22 +1304,8 @@ def main() -> None:
     if ranking_model is not None:
         save_pickle(ranking_model, rank_model_path)
         artifacts.append(rank_model_path)
-        if ONNX_AVAILABLE and not ranking_features.empty:
-            try:
-                initial_type = [
-                    ("feature_input", FloatTensorType([None, ranking_features.shape[1]]))
-                ]
-                onnx_model = convert_sklearn(ranking_model, initial_types=initial_type)
-                onnx_path = MODELS_DIR / "rank_model.onnx"
-                onnx_path.write_bytes(onnx_model.SerializeToString())
-                artifacts.append(onnx_path)
-                LOGGER.info("Exported LightGBM ranking model to ONNX (%s)", onnx_path)
-            except Exception as exc:  # noqa: BLE001
-                LOGGER.warning("Failed to export ONNX model: %s", exc)
-        elif not ONNX_AVAILABLE:
-            LOGGER.info("skl2onnx not installed; skipping ONNX export")
     else:
-        LOGGER.warning("Ranking model training skipped due to insufficient label diversity")
+        LOGGER.warning("Ranking model training skipped due to insufficient data")
 
     embeddings_available = content_meta.get("modalities", 0.0) > 1.0
     params = {
@@ -1092,8 +1317,8 @@ def main() -> None:
         "image_similarity_weight": content_meta.get("image_similarity_weight", 0.0),
         "ranking_labels_source": "matomo" if not ranking_labels.empty else "interactions",
         "ranking_samples": int(len(ranking_target)),
-        "ranking_positive_samples": int((ranking_target > 0).sum()) if not ranking_target.empty else 0,
-        "ranking_task_type": ranking_task,
+        "ranking_positive_samples": int(ranking_target.sum()) if not ranking_target.empty else 0,
+        "ranking_task_type": "lambdarank",
         "ranking_metric_name": ranking_metric["name"],
     }
     metrics = {
@@ -1114,14 +1339,18 @@ def main() -> None:
     if embeddings_path.exists():
         artifacts.append(embeddings_path)
 
-    if not ranking_scores.empty:
-        ranking_snapshot = ranking_meta.copy()
-        ranking_snapshot["score"] = ranking_scores.values
+    if not ranking_scores.empty and not request_feature_frame.empty:
+        preview = request_feature_frame[["dataset_id"]].copy()
+        preview["score"] = ranking_scores.values
+        ranking_snapshot = (
+            preview.groupby("dataset_id")["score"]
+            .mean()
+            .reset_index()
+            .sort_values("score", ascending=False)
+        )
         snapshot_path = MODELS_DIR / "ranking_scores_preview.json"
         snapshot_path.write_text(
-            ranking_snapshot.sort_values("score", ascending=False)
-            .head(50)
-            .to_json(orient="records", force_ascii=False, indent=2)
+            ranking_snapshot.head(50).to_json(orient="records", force_ascii=False, indent=2)
         )
         artifacts.append(snapshot_path)
         metrics["ranking_top_score"] = float(ranking_snapshot["score"].max())

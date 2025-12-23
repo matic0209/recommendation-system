@@ -1,9 +1,10 @@
 """Build ranking training labels by joining exposures with Matomo clicks."""
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
-from typing import Tuple
+from typing import Dict, Tuple
 
 import pandas as pd
 
@@ -19,6 +20,17 @@ SLOT_METRICS_SOURCE_PATH = PROCESSED_DIR / "recommend_slot_metrics.parquet"
 SAMPLES_PATH = PROCESSED_DIR / "ranking_training_samples.parquet"
 DATASET_LABELS_PATH = PROCESSED_DIR / "ranking_labels_by_dataset.parquet"
 SLOT_LABELS_PATH = PROCESSED_DIR / "ranking_slot_metrics.parquet"
+DEFAULT_CHANNEL_WEIGHTS: Dict[str, float] = {
+    "behavior": 1.5,
+    "content": 0.8,
+    "vector": 0.5,
+    "popular": 0.05,
+    "tag": 0.4,
+    "category": 0.3,
+    "price": 0.2,
+    "usercf": 0.6,
+    "image": 0.4,
+}
 
 
 def _load_optional_parquet(path: Path, expected_columns: Tuple[str, ...]) -> pd.DataFrame:
@@ -35,7 +47,26 @@ def _load_optional_parquet(path: Path, expected_columns: Tuple[str, ...]) -> pd.
 def _prepare_exposures() -> pd.DataFrame:
     exposures = _load_optional_parquet(
         EXPOSURES_PATH,
-        ("request_id", "dataset_id", "algorithm_version", "user_id", "page_id", "timestamp", "position"),
+        (
+            "request_id",
+            "dataset_id",
+            "algorithm_version",
+            "user_id",
+            "page_id",
+            "endpoint",
+            "variant",
+            "experiment_variant",
+            "degrade_reason",
+            "source",
+            "device_type",
+            "locale",
+            "client_app",
+            "channel_weights",
+            "score",
+            "reason",
+            "timestamp",
+            "position",
+        ),
     )
     if exposures.empty:
         return exposures
@@ -48,6 +79,43 @@ def _prepare_exposures() -> pd.DataFrame:
         .reset_index(drop=True)
     )
     return exposures
+
+
+def _extract_channel(reason: object) -> str:
+    if reason is None:
+        return "unknown"
+    text = str(reason).lower()
+    if not text:
+        return "unknown"
+    parts = [token for token in text.split("+") if token]
+    if not parts:
+        return "unknown"
+    channel = parts[0]
+    if channel.startswith("fallback"):
+        return "fallback"
+    return channel
+
+
+def _resolve_channel_weight(channel_weights: object, channel: str) -> float:
+    if channel in DEFAULT_CHANNEL_WEIGHTS:
+        default = DEFAULT_CHANNEL_WEIGHTS[channel]
+    else:
+        default = 0.1
+    if not channel_weights:
+        return default
+    payload = channel_weights
+    if isinstance(channel_weights, str):
+        try:
+            payload = json.loads(channel_weights)
+        except json.JSONDecodeError:
+            payload = None
+    if isinstance(payload, dict):
+        try:
+            value = float(payload.get(channel, default))
+            return value
+        except (TypeError, ValueError):
+            return default
+    return default
 
 
 def _prepare_clicks() -> pd.DataFrame:
@@ -98,7 +166,62 @@ def build_training_labels() -> None:
         samples = samples.rename(columns={"server_time": "clicked_at"})
         samples["label"] = samples["clicked_at"].notna().astype(int)
     else:
-        samples = pd.DataFrame(columns=["request_id", "dataset_id", "algorithm_version", "user_id", "page_id", "timestamp", "position", "clicked_at", "label"])
+        samples = pd.DataFrame(columns=[
+            "request_id",
+            "dataset_id",
+            "algorithm_version",
+            "user_id",
+            "page_id",
+            "timestamp",
+            "position",
+            "clicked_at",
+            "label",
+            "endpoint",
+            "variant",
+            "experiment_variant",
+            "degrade_reason",
+            "source",
+            "device_type",
+            "locale",
+            "client_app",
+            "channel_weights",
+            "score",
+            "reason",
+        ])
+
+    if not samples.empty:
+        samples["reason"] = samples.get("reason").fillna("")
+        samples["channel"] = samples["reason"].apply(_extract_channel)
+        samples["channel_weight"] = samples.apply(
+            lambda row: _resolve_channel_weight(row.get("channel_weights"), row.get("channel")),
+            axis=1,
+        )
+        context_defaults = {
+            "endpoint": "unknown",
+            "variant": "primary",
+            "experiment_variant": "control",
+            "degrade_reason": "none",
+            "source": "unknown",
+            "device_type": "unknown",
+            "locale": "unknown",
+            "client_app": "",
+        }
+        for column, default in context_defaults.items():
+            if column in samples.columns:
+                samples[column] = samples[column].fillna(default).astype(str)
+            else:
+                samples[column] = default
+        if "score" in samples.columns:
+            samples["score"] = pd.to_numeric(samples["score"], errors="coerce").fillna(0.0)
+        else:
+            samples["score"] = 0.0
+        if "position" in samples.columns:
+            samples["position"] = pd.to_numeric(samples["position"], errors="coerce").fillna(-1).astype(int)
+        else:
+            samples["position"] = -1
+    else:
+        samples["channel"] = pd.Series(dtype="object")
+        samples["channel_weight"] = pd.Series(dtype="float64")
 
     PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
     samples.to_parquet(SAMPLES_PATH, index=False)
