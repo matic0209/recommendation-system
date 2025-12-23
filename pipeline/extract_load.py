@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Iterable, Optional
+from uuid import uuid4
 
 import pandas as pd
 from pandas.api.types import is_object_dtype, is_string_dtype
@@ -364,6 +365,7 @@ def _merge_incremental_output(output_file: Path, chunk: pd.DataFrame, primary_ke
     if chunk.empty:
         return
 
+    _ensure_dir(output_file.parent)
     chunk = _deduplicate_by_keys(chunk, primary_keys)
     if output_file.exists():
         try:
@@ -379,9 +381,20 @@ def _merge_incremental_output(output_file: Path, chunk: pd.DataFrame, primary_ke
         combined = chunk
 
     combined = _deduplicate_by_keys(combined, primary_keys)
-    tmp_path = output_file.with_suffix(".tmp.parquet")
+    tmp_name = f".{output_file.stem}.{uuid4().hex}.tmp{''.join(output_file.suffixes) or '.parquet'}"
+    tmp_path = output_file.parent / tmp_name
     combined.to_parquet(tmp_path, index=False)
-    tmp_path.replace(output_file)
+    try:
+        tmp_path.replace(output_file)
+    except FileNotFoundError:
+        LOGGER.warning("Temporary parquet %s missing before replace; writing directly to %s", tmp_path, output_file)
+        combined.to_parquet(output_file, index=False)
+    except OSError as exc:  # noqa: BLE001
+        LOGGER.warning("Failed to replace %s with %s (%s); writing directly", tmp_path, output_file, exc)
+        combined.to_parquet(output_file, index=False)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink(missing_ok=True)
 
 
 def _export_table_from_json(
