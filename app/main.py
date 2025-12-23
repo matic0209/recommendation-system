@@ -2410,22 +2410,25 @@ async def get_similar(
             )
             user_feature_map: Dict[str, float] = {}
             await _call_blocking(
-                _apply_ranking,
-                scores,
-                reasons,
-                local_bundle.rank_model,
-                state.raw_features,
-                state.dataset_stats,
-                state.slot_metrics_aggregated,
-                state.feature_store,
+                partial(
+                    _apply_ranking,
+                    scores,
+                    reasons,
+                    local_bundle.rank_model,
+                    state.raw_features,
+                    state.dataset_stats,
+                    state.slot_metrics_aggregated,
+                    state.feature_store,
+                    endpoint=endpoint,
+                    variant=local_variant,
+                    experiment_variant=None,
+                    request_context=request_context,
+                    channel_weights=effective_weights,
+                    user_features=user_feature_map,
+                ),
                 endpoint=endpoint,
                 operation="model_inference",
                 timeout=TimeoutManager.get_timeout("model_inference"),
-                variant=local_variant,
-                experiment_variant=None,
-                request_context=request_context,
-                channel_weights=effective_weights,
-                user_features=user_feature_map,
             )
             mmr_lambda = _compute_mmr_lambda(endpoint=endpoint, request_context=request_context)
             items = _build_response_items(
@@ -2683,22 +2686,25 @@ async def recommend_for_detail(
             )
             user_feature_map = _get_user_features(state, user_id)
             await _call_blocking(
-                _apply_ranking,
-                scores,
-                reasons,
-                local_bundle.rank_model,
-                state.raw_features,
-                state.dataset_stats,
-                state.slot_metrics_aggregated,
-                state.feature_store,
+                partial(
+                    _apply_ranking,
+                    scores,
+                    reasons,
+                    local_bundle.rank_model,
+                    state.raw_features,
+                    state.dataset_stats,
+                    state.slot_metrics_aggregated,
+                    state.feature_store,
+                    endpoint=endpoint,
+                    variant=local_variant,
+                    experiment_variant=experiment_variant,
+                    request_context=request_context,
+                    channel_weights=effective_weights,
+                    user_features=user_feature_map,
+                ),
                 endpoint=endpoint,
                 operation="model_inference",
                 timeout=TimeoutManager.get_timeout("model_inference"),
-                variant=local_variant,
-                experiment_variant=experiment_variant,
-                request_context=request_context,
-                channel_weights=effective_weights,
-                user_features=user_feature_map,
             )
             mmr_lambda = _compute_mmr_lambda(endpoint=endpoint, request_context=request_context)
             items = _build_response_items(
