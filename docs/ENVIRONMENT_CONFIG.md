@@ -48,8 +48,13 @@ bash scripts/deploy_prod.sh
 bash scripts/deploy_prod.sh --pull
 ```
 
+**注意**：脚本会自动检测 Docker Compose 版本（V1 或 V2）并使用正确的命令：
+- V1: `docker-compose` (连字符)
+- V2: `docker compose` (空格)
+
 #### 方式2: 手动部署
 
+**Docker Compose V1 (使用连字符)**:
 ```bash
 # 使用 .env.prod 配置启动
 docker-compose -f docker-compose.yml -f docker-compose.prod.yml up -d
@@ -62,6 +67,30 @@ docker-compose -f docker-compose.yml -f docker-compose.prod.yml logs -f airflow-
 
 # 停止服务
 docker-compose -f docker-compose.yml -f docker-compose.prod.yml down
+```
+
+**Docker Compose V2 (使用空格)**:
+```bash
+# 使用 .env.prod 配置启动
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+
+# 重启特定服务
+docker compose -f docker-compose.yml -f docker-compose.prod.yml restart airflow-scheduler
+
+# 查看日志
+docker compose -f docker-compose.yml -f docker-compose.prod.yml logs -f airflow-scheduler
+
+# 停止服务
+docker compose -f docker-compose.yml -f docker-compose.prod.yml down
+```
+
+检查你的版本：
+```bash
+# V1
+docker-compose --version
+
+# V2
+docker compose version
 ```
 
 #### 方式3: 本地测试生产配置
