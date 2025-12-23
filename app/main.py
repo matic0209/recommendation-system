@@ -1899,6 +1899,19 @@ def _prepare_ranker_features(rank_model, features: pd.DataFrame) -> pd.DataFrame
     return working[required_columns] if required_columns else working
 
 
+def _align_features_to_estimator(rank_model, features: pd.DataFrame) -> pd.DataFrame:
+    """Align features to estimators that expect specific training columns."""
+    feature_names = getattr(rank_model, "feature_names_in_", None)
+    if feature_names is None:
+        return features
+    required = list(feature_names)
+    working = features.copy()
+    for column in required:
+        if column not in working.columns:
+            working[column] = 0.0
+    return working[required]
+
+
 def _predict_rank_scores(rank_model, features: pd.DataFrame) -> pd.Series:
     if rank_model is None or features.empty:
         return pd.Series(dtype=float)
@@ -1907,10 +1920,11 @@ def _predict_rank_scores(rank_model, features: pd.DataFrame) -> pd.Series:
             prepared = _prepare_ranker_features(rank_model, features)
             scores = rank_model["model"].predict(prepared)
             return pd.Series(scores, index=features.index, dtype=float)
+        aligned = _align_features_to_estimator(rank_model, features)
         if hasattr(rank_model, "predict_proba"):
-            scores = rank_model.predict_proba(features)[:, 1]
+            scores = rank_model.predict_proba(aligned)[:, 1]
             return pd.Series(scores, index=features.index, dtype=float)
-        scores = rank_model.predict(features)
+        scores = rank_model.predict(aligned)
         return pd.Series(scores, index=features.index, dtype=float)
     except Exception as exc:  # noqa: BLE001
         LOGGER.warning("Ranking model prediction failed: %s", exc)
