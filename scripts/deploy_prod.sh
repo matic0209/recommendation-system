@@ -140,6 +140,96 @@ else
     echo -e "${YELLOW}⚠ Airflow Webserver: 未就绪（可能仍在启动中）${NC}"
 fi
 
+# 部署后验证和初始化
+echo ""
+echo "=========================================="
+echo ">>> 部署后验证..."
+echo "=========================================="
+
+# 1. 检查数据文件是否存在
+echo ""
+echo "1. 检查数据文件..."
+if [ -f "data/processed/dataset_features.parquet" ]; then
+    echo -e "${GREEN}✓ 数据集特征文件存在${NC}"
+else
+    echo -e "${YELLOW}⚠ 数据集特征文件不存在，可能需要运行训练流程${NC}"
+fi
+
+if [ -f "models/ranking_model.txt" ]; then
+    echo -e "${GREEN}✓ 排序模型文件存在${NC}"
+else
+    echo -e "${YELLOW}⚠ 排序模型文件不存在，可能需要运行训练流程${NC}"
+fi
+
+# 2. 测试推荐 API 功能
+echo ""
+echo "2. 测试推荐 API 功能..."
+API_HEALTH=$(curl -sf "http://localhost:${RECOMMEND_API_HOST_PORT:-8090}/health" 2>/dev/null)
+if [ $? -eq 0 ]; then
+    echo -e "${GREEN}✓ API 健康检查通过${NC}"
+
+    # 测试推荐接口（如果 API 已就绪）
+    TEST_RESPONSE=$(curl -sf "http://localhost:${RECOMMEND_API_HOST_PORT:-8090}/recommend/detail/1?user_id=123&limit=5" 2>/dev/null)
+    if [ $? -eq 0 ]; then
+        echo -e "${GREEN}✓ 推荐接口测试通过${NC}"
+    else
+        echo -e "${YELLOW}⚠ 推荐接口测试失败（可能数据未加载）${NC}"
+    fi
+else
+    echo -e "${YELLOW}⚠ API 尚未就绪，跳过功能测试${NC}"
+fi
+
+# 3. 检查 Airflow DAG 状态
+echo ""
+echo "3. 检查 Airflow DAG 状态..."
+if curl -sf "http://localhost:${AIRFLOW_WEB_HOST_PORT:-8080}/health" > /dev/null 2>&1; then
+    # 等待 Airflow 完全启动
+    sleep 5
+
+    # 列出可用的 DAG（需要等 Airflow 完全就绪）
+    DAG_COUNT=$($DOCKER_COMPOSE -f docker-compose.yml -f docker-compose.prod.yml exec -T airflow-webserver airflow dags list 2>/dev/null | grep -v "dag_id" | grep -v "^$" | wc -l)
+    if [ "$DAG_COUNT" -gt 0 ]; then
+        echo -e "${GREEN}✓ 检测到 $DAG_COUNT 个 Airflow DAG${NC}"
+        echo "  可用 DAG："
+        $DOCKER_COMPOSE -f docker-compose.yml -f docker-compose.prod.yml exec -T airflow-webserver airflow dags list 2>/dev/null | grep -v "dag_id" | head -5 | sed 's/^/    /'
+    else
+        echo -e "${YELLOW}⚠ 未检测到 Airflow DAG（可能仍在加载）${NC}"
+    fi
+else
+    echo -e "${YELLOW}⚠ Airflow 未就绪，跳过 DAG 检查${NC}"
+fi
+
+# 4. 询问是否触发训练流程
+echo ""
+echo "4. 初始化数据和模型..."
+if [ ! -f "models/ranking_model.txt" ] || [ ! -f "data/processed/dataset_features.parquet" ]; then
+    echo -e "${YELLOW}检测到模型或数据文件缺失${NC}"
+    read -p "是否立即触发训练流程？(y/N) " -n 1 -r
+    echo
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        echo ""
+        echo ">>> 触发训练流程..."
+
+        # 检查 Airflow 中是否有训练 DAG
+        TRAIN_DAG=$($DOCKER_COMPOSE -f docker-compose.yml -f docker-compose.prod.yml exec -T airflow-webserver airflow dags list 2>/dev/null | grep -i "train" | head -1 | awk '{print $1}')
+
+        if [ -n "$TRAIN_DAG" ]; then
+            echo "找到训练 DAG: $TRAIN_DAG"
+            echo "触发 DAG 运行..."
+            $DOCKER_COMPOSE -f docker-compose.yml -f docker-compose.prod.yml exec -T airflow-webserver airflow dags trigger "$TRAIN_DAG"
+            echo -e "${GREEN}✓ 训练流程已触发${NC}"
+            echo "  查看进度: http://localhost:${AIRFLOW_WEB_HOST_PORT:-8080}"
+        else
+            echo -e "${YELLOW}未找到训练 DAG，手动运行训练：${NC}"
+            echo "  $DOCKER_COMPOSE -f docker-compose.yml -f docker-compose.prod.yml exec airflow-scheduler python3 -m pipeline.train_models"
+        fi
+    else
+        echo "跳过训练流程"
+    fi
+else
+    echo -e "${GREEN}✓ 模型和数据文件已存在${NC}"
+fi
+
 echo ""
 echo "=========================================="
 echo -e "${GREEN}✅ 部署完成！${NC}"
