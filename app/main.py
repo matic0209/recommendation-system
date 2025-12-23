@@ -1708,15 +1708,12 @@ def _compute_ranking_features(
 
     realtime_features = _fetch_dataset_features_from_store(feature_store, dataset_ids)
     if realtime_features:
-        store_df = pd.DataFrame.from_dict(realtime_features, orient="index")
-        store_df.index = store_df.index.astype(int)
-        store_df = store_df.reindex(dataset_ids)
-        for column in store_df.columns:
-            store_series = store_df[column]
-            if column in selected.columns:
-                selected[column] = store_series.combine_first(selected[column])
-            else:
-                selected[column] = store_series
+        store_df = (
+            pd.DataFrame.from_dict(realtime_features, orient="index")
+            .rename_axis("dataset_id")
+            .reindex(dataset_ids)
+        )
+        selected = store_df.combine_first(selected)
 
     selected["description_length"] = selected.get("description", "").str.len().astype(float)
     selected["tag_count"] = selected.get("tag", "").apply(
@@ -1734,15 +1731,14 @@ def _compute_ranking_features(
 
     realtime_stats = _fetch_dataset_stats_from_store(feature_store, dataset_ids)
     if realtime_stats:
-        stats_updates = pd.DataFrame.from_dict(realtime_stats, orient="index")
-        stats_updates.index = stats_updates.index.astype(int)
-        stats_updates = stats_updates.reindex(dataset_ids)
-        for column in stats_updates.columns:
-            store_series = pd.to_numeric(stats_updates[column], errors="coerce")
-            if column in stats.columns:
-                stats[column] = store_series.combine_first(stats[column])
-            else:
-                stats[column] = store_series.fillna(0.0)
+        stats_updates = (
+            pd.DataFrame.from_dict(realtime_stats, orient="index")
+            .rename_axis("dataset_id")
+            .reindex(dataset_ids)
+            .apply(pd.to_numeric, errors="coerce")
+        )
+        stats = stats_updates.combine_first(stats)
+        stats = stats.fillna(0.0)
 
     features = pd.DataFrame(index=dataset_ids)
     features["price_log"] = np.log1p(selected["price"].clip(lower=0.0))
