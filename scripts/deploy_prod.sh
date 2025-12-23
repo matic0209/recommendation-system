@@ -25,7 +25,10 @@ fi
 echo -e "${GREEN}✓ 使用配置文件: .env.prod${NC}"
 
 # 加载 .env.prod 配置（用于显示端口信息）
-export $(grep -v '^#' .env.prod | xargs)
+# 过滤掉注释行和行内注释，只保留 KEY=VALUE 格式
+set -a
+source <(grep -v '^#' .env.prod | sed 's/#.*$//' | sed 's/[[:space:]]*$//' | grep -v '^$')
+set +a
 
 # 显示关键配置
 echo ""
