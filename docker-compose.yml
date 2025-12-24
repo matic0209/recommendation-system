@@ -126,6 +126,7 @@ services:
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres-airflow/airflow
       PYTHONPATH: /opt/recommend
+      DATA_DIR: /opt/recommend/data
       MLFLOW_TRACKING_URI: http://mlflow:5000
       SENTENCE_TRANSFORMERS_HOME: /opt/recommend/cache/sentence-transformers
       HF_HOME: /opt/recommend/cache/huggingface
@@ -186,6 +187,7 @@ services:
       SENTRY_DSN: ${SENTRY_DSN}
       SENTRY_ENVIRONMENT: ${SENTRY_ENVIRONMENT:-production}
       PYTHONPATH: /opt/recommend
+      DATA_DIR: /opt/recommend/data
       MLFLOW_TRACKING_URI: http://mlflow:5000
       HF_ENDPOINT: ${HF_ENDPOINT:-https://hf-mirror.com}
       SENTENCE_TRANSFORMERS_HOME: /opt/recommend/cache/sentence-transformers
@@ -230,6 +232,7 @@ services:
       SENTRY_DSN: ${SENTRY_DSN}
       SENTRY_ENVIRONMENT: ${SENTRY_ENVIRONMENT:-production}
       PYTHONPATH: /opt/recommend
+      DATA_DIR: /opt/recommend/data
       MLFLOW_TRACKING_URI: http://mlflow:5000
       HF_ENDPOINT: ${HF_ENDPOINT:-https://hf-mirror.com}
       SENTENCE_TRANSFORMERS_HOME: /opt/recommend/cache/sentence-transformers
