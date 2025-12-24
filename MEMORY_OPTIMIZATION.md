@@ -87,6 +87,14 @@ reduce_memory_usage()
    - 在 `main()` 中添加 DataFrame 优化
    - 在特征构建步骤间添加内存清理
 
+### 6. 行为召回邻居裁剪
+
+**文件**: `pipeline/train_models.py`
+
+- 新增 `BEHAVIOR_SIMILARITY_TOP_K` 环境变量限制行为相似度召回的邻居数量
+- 默认值与 `SIMILARITY_TOP_K` 一致（200），可按需降低到 50/100
+- 只保留高频共现的 top-K 邻居，字典体积大幅下降，常规生产数据能再节省 50%+ 的内存
+
 ## 配置参数
 
 通过环境变量控制内存优化行为：
@@ -108,6 +116,7 @@ environment:
 |------|--------|------|----------|
 | `SIMILARITY_BATCH_SIZE` | 1000 | 相似度计算批次大小 | 内存不足时减少到 500 或 250 |
 | `SIMILARITY_TOP_K` | 200 | 保留 top-K 相似项 | 召回需求低时可减少到 100 |
+| `BEHAVIOR_SIMILARITY_TOP_K` | 继承 `SIMILARITY_TOP_K` | 用户行为召回每个数据集保留的相似邻居数 | 生产内存紧张时可调到 50~100 |
 | `USE_FAISS_RECALL` | 1 | 是否使用 Faiss 向量召回 | 内存受限时可设为 0 |
 
 ## 效果预估

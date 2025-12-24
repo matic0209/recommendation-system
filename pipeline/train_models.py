@@ -80,6 +80,9 @@ from pipeline.memory_optimizer import (
     reduce_memory_usage,
 )
 
+# Memory tuning knobs (env overrides allow production to shrink memory footprint)
+_default_top_k = os.getenv("SIMILARITY_TOP_K", "200")
+BEHAVIOR_SIMILARITY_TOP_K = int(os.getenv("BEHAVIOR_SIMILARITY_TOP_K", _default_top_k))
 RANKING_CVR_WEIGHT = float(os.getenv("RANKING_CVR_WEIGHT", "0.5"))
 PROCESSED_DIR = DATA_DIR / "processed"
 REGISTRY_HISTORY_LIMIT = 20
@@ -202,12 +205,33 @@ def train_behavior_similarity(interactions: pd.DataFrame) -> Dict[int, Dict[int,
                     continue
                 co_counts[item][other] += 1
 
+    limit = max(BEHAVIOR_SIMILARITY_TOP_K, 0)
+    if limit:
+        LOGGER.info("Limiting behavior similarity neighbors to top %d items per dataset", limit)
+    else:
+        LOGGER.info("Behavior similarity neighbor limit disabled (BEHAVIOR_SIMILARITY_TOP_K <= 0)")
+
     similarity = {}
     for item, counts in co_counts.items():
-        total = sum(counts.values())
+        if not counts:
+            continue
+
+        if limit and len(counts) > limit:
+            top_pairs = counts.most_common(limit)
+        else:
+            top_pairs = list(counts.items())
+
+        total = sum(count for _, count in top_pairs)
         if not total:
             continue
-        similarity[item] = {other: count / total for other, count in counts.items()}
+
+        similarity[item] = {
+            other: float(count) / float(total)
+            for other, count in top_pairs
+            if count > 0
+        }
+
+    co_counts.clear()
     return similarity
 
 

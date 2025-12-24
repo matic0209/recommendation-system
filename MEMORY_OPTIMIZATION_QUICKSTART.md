@@ -58,6 +58,9 @@ export SIMILARITY_BATCH_SIZE=500
 # 减少 top-K（更省内存，但召回质量略降）
 export SIMILARITY_TOP_K=100
 
+# 限制用户行为召回邻居数量
+export BEHAVIOR_SIMILARITY_TOP_K=80
+
 # 禁用 Faiss（如果不需要向量召回）
 export USE_FAISS_RECALL=0
 ```
