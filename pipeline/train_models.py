@@ -8,7 +8,7 @@ import os
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Iterable, List, Tuple, Optional
+from typing import Any, Dict, Iterable, List, Tuple, Optional
 
 LOGGER = logging.getLogger(__name__)
 
@@ -908,6 +908,41 @@ def _prepare_request_ranking_data(
     return enriched, target, group_sizes, feature_info
 
 
+def _prepare_ranker_preview_features(
+    rank_model: Dict[str, Any],
+    features: pd.DataFrame,
+) -> pd.DataFrame:
+    """Align preview features with the trained ranker expectations."""
+    if not rank_model:
+        return features
+
+    working = features.copy()
+    feature_columns = rank_model.get("feature_columns") or list(working.columns)
+    feature_types = rank_model.get("feature_types", {})
+    category_mappings = rank_model.get("category_mappings", {})
+
+    for column in feature_columns:
+        if column in working.columns:
+            continue
+        if feature_types.get(column) == "categorical":
+            working[column] = "unknown"
+        else:
+            working[column] = 0.0
+
+    for column in feature_columns:
+        if feature_types.get(column) == "categorical":
+            working[column] = working[column].fillna("unknown").astype(str)
+            categories = category_mappings.get(column)
+            if categories:
+                working[column] = pd.Categorical(working[column], categories=categories)
+            else:
+                working[column] = working[column].astype("category")
+        else:
+            working[column] = pd.to_numeric(working[column], errors="coerce").fillna(0.0)
+
+    return working[feature_columns]
+
+
 def _train_lightgbm_ranker(
     data: pd.DataFrame,
     target: pd.Series,
@@ -1297,9 +1332,13 @@ def main() -> None:
         and "model" in ranking_model
     ):
         try:
+            preview_features = _prepare_ranker_preview_features(
+                ranking_model,
+                request_feature_frame,
+            )
             ranking_scores = pd.Series(
                 ranking_model["model"].predict(
-                    request_feature_frame[ranking_model["feature_columns"]]
+                    preview_features
                 ),
                 index=request_feature_frame.index,
                 dtype=float,
