@@ -4,6 +4,7 @@ x-env-file: &default-env
     # Production: docker-compose --env-file .env.prod up
     # Development: docker-compose up (uses .env)
     - .env
+    - .env.memory
 
 services:
   redis:
