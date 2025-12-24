@@ -447,16 +447,20 @@ def generate_text_embeddings(
         for i in range(n_pca_components):
             dataset_features[f"text_pca_{i}"] = embeddings_pca[:, i]
 
-        # Save full embeddings for user-item similarity computation
-        # Store as columns for later use
-        for i in range(embeddings.shape[1]):
-            dataset_features[f"text_embed_{i}"] = embeddings[:, i]
+        # NOTE: Full embeddings (384 dims) NOT saved to reduce memory usage
+        # Only PCA components (10 dims) are saved for ranking model
+        # This reduces memory from ~300MB to ~8MB for 100k items
 
         LOGGER.info(
-            "Text embedding features added: 3 stats + %d PCA + %d full embeddings",
+            "Text embedding features added: 3 stats + %d PCA components (full embeddings discarded to save memory)",
             n_pca_components,
-            embeddings.shape[1],
         )
+
+        # Free memory
+        del embeddings
+        del embeddings_pca
+        import gc
+        gc.collect()
 
         return dataset_features, pca
 
