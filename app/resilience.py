@@ -294,7 +294,7 @@ class TimeoutManager:
         "redis_set": 0.2,
         "model_inference": 1.0,
         "database_query": 2.0,
-        "recommendation_total": 2.0,
+        "recommendation_total": 5.0,  # Increased from 2.0 to handle slow requests
         "feature_fetch": 0.5,
     }
 
