@@ -259,19 +259,24 @@ def build_sparse_similarity_matrix(
 
 def reduce_memory_usage() -> None:
     """Force garbage collection and log memory usage."""
-    import psutil
-    import os
+    try:
+        import psutil  # type: ignore
+        import os
 
-    process = psutil.Process(os.getpid())
-    mem_before = process.memory_info().rss / 1024 / 1024  # MB
+        process = psutil.Process(os.getpid())
+        mem_before = process.memory_info().rss / 1024 / 1024  # MB
 
-    gc.collect()
+        gc.collect()
 
-    mem_after = process.memory_info().rss / 1024 / 1024  # MB
+        mem_after = process.memory_info().rss / 1024 / 1024  # MB
 
-    LOGGER.info(
-        "Memory usage: %.1f MB -> %.1f MB (freed %.1f MB)",
-        mem_before,
-        mem_after,
-        mem_before - mem_after,
-    )
+        LOGGER.info(
+            "Memory usage: %.1f MB -> %.1f MB (freed %.1f MB)",
+            mem_before,
+            mem_after,
+            mem_before - mem_after,
+        )
+    except ImportError:
+        # psutil may not be available in lightweight test environments
+        freed = gc.collect()
+        LOGGER.info("Memory usage: psutil unavailable, freed %d objects via GC", freed)

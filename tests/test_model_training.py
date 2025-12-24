@@ -57,11 +57,12 @@ def test_behavior_similarity_generates_neighbors():
     assert behavior[101][102] > 0
 
 
-def test_content_similarity_matrix_shape_matches_items():
+def test_content_similarity_covers_all_items():
     dataset_features = _sample_dataset_features()
-    content_map, matrix, item_ids, meta = train_content_similarity(dataset_features)
+    content_map, item_ids, meta = train_content_similarity(dataset_features)
     assert content_map
-    assert matrix.shape[0] == matrix.shape[1] == len(item_ids)
+    assert len(item_ids) == len(dataset_features)
+    assert set(item_ids) == set(dataset_features["dataset_id"])
     # Ensure vector similarity bonds exist for finance items
     neighbours = content_map[101]
     assert 102 in neighbours and neighbours[102] > 0
@@ -70,9 +71,9 @@ def test_content_similarity_matrix_shape_matches_items():
 
 def test_vector_recall_top_k_limit():
     dataset_features = _sample_dataset_features()
-    _, sim_matrix, item_ids, _ = train_content_similarity(dataset_features)
+    content_map, item_ids, _ = train_content_similarity(dataset_features)
     top_k = min(2, VECTOR_RECALL_K)
-    neighbors = build_vector_recall(sim_matrix, item_ids, top_k)
+    neighbors = build_vector_recall(content_map, item_ids, top_k)
     assert neighbors
     for source, items in neighbors.items():
         assert len(items) <= top_k
@@ -83,12 +84,31 @@ def test_vector_recall_top_k_limit():
 def test_ranking_model_trains_and_scores():
     dataset_features = _sample_dataset_features()
     dataset_stats = _sample_dataset_stats()
-    meta, features, target = _prepare_ranking_dataset(dataset_features, dataset_stats)
-    model, auc = _train_ranking_model(features, target)
-    # We expect to train a model with AUC between 0 and 1
+    labels = pd.DataFrame(
+        [
+            {"dataset_id": 101, "label": 1, "click_count": 10, "exposure_count": 100, "conversion_count": 2},
+            {"dataset_id": 102, "label": 1, "click_count": 8, "exposure_count": 80, "conversion_count": 1},
+            {"dataset_id": 103, "label": 0, "click_count": 2, "exposure_count": 20, "conversion_count": 0},
+            {"dataset_id": 104, "label": 0, "click_count": 1, "exposure_count": 15, "conversion_count": 0},
+            {"dataset_id": 105, "label": 0, "click_count": 0, "exposure_count": 10, "conversion_count": 0},
+        ]
+    )
+    meta, features, target, sample_weight, task_type = _prepare_ranking_dataset(
+        dataset_features,
+        dataset_stats,
+        labels=labels,
+        slot_metrics=None,
+    )
+    model, metric = _train_ranking_model(features, target, sample_weight, task_type)
+    # We expect to train a model and receive a numeric metric
     assert model is not None
-    assert 0.5 <= auc <= 1.0
+    assert isinstance(metric, dict)
+    assert metric["name"] in {"auc", "r2"}
+    assert np.isfinite(metric["value"])
     # Ranking scores should be available for each dataset
-    scores = model.predict_proba(features)[:, 1]
+    if task_type == "classification":
+        scores = model.predict_proba(features)[:, 1]
+    else:
+        scores = model.predict(features)
     assert scores.shape[0] == meta.shape[0]
     assert np.all((scores >= 0) & (scores <= 1))

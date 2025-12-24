@@ -237,13 +237,13 @@ def train_behavior_similarity(interactions: pd.DataFrame) -> Dict[int, Dict[int,
 
 def train_content_similarity(
     dataset_features: pd.DataFrame,
-) -> Tuple[Dict[int, Dict[int, float]], np.ndarray, List[int], Dict[str, float]]:
+) -> Tuple[Dict[int, Dict[int, float]], List[int], Dict[str, float]]:
     """Train content-based similarity with memory optimization.
 
     OPTIMIZED: Uses batch processing to avoid creating full N x N similarity matrix in memory.
     """
     if dataset_features.empty:
-        return {}, np.empty((0, 0)), [], {"modalities": 0.0, "image_embedding_dim": 0.0, "image_similarity_weight": 0.0}
+        return {}, [], {"modalities": 0.0, "image_embedding_dim": 0.0, "image_similarity_weight": 0.0}
 
     features = dataset_features.copy()
     features["text"] = (
@@ -300,20 +300,6 @@ def train_content_similarity(
             for neighbor_idx, score in neighbors.items()
         }
 
-    # Build a lightweight similarity matrix for vector recall (top K only)
-    # Instead of full N x N, we only store top K neighbors
-    n_items = len(item_ids)
-    similarity_matrix = np.zeros((n_items, top_k), dtype=np.float32)
-
-    for idx in range(n_items):
-        if idx in similarity_by_idx:
-            neighbors = similarity_by_idx[idx]
-            # Sort by score and take top K
-            sorted_neighbors = sorted(neighbors.items(), key=lambda x: x[1], reverse=True)[:top_k]
-            for rank, (_, score) in enumerate(sorted_neighbors):
-                if rank < top_k:
-                    similarity_matrix[idx, rank] = score
-
     LOGGER.info(
         "Content similarity computed: %d items, avg %.1f neighbors per item",
         len(similarity),
@@ -326,7 +312,7 @@ def train_content_similarity(
         del image_vectors
     reduce_memory_usage()
 
-    return similarity, similarity_matrix, item_ids, meta
+    return similarity, item_ids, meta
 
 
 def build_popular_items(interactions: pd.DataFrame, top_k: int = 50) -> List[int]:
@@ -336,25 +322,34 @@ def build_popular_items(interactions: pd.DataFrame, top_k: int = 50) -> List[int
     return counts.head(top_k).index.astype(int).tolist()
 
 
-def build_vector_recall(similarity_matrix: np.ndarray, item_ids: List[int], top_k: int) -> Dict[int, List[Dict[str, float]]]:
-    if similarity_matrix.size == 0 or not item_ids:
+def build_vector_recall(
+    similarity: Dict[int, Dict[int, float]],
+    item_ids: List[int],
+    top_k: int,
+) -> Dict[int, List[Dict[str, float]]]:
+    if not item_ids:
         return {}
     neighbors: Dict[int, List[Dict[str, float]]] = {}
-    for idx, item_id in enumerate(item_ids):
-        row = similarity_matrix[idx].copy()
-        if idx < row.shape[0]:
-            row[idx] = 0.0
-        top_indices = np.argsort(row)[::-1][:top_k]
+    for item_id in item_ids:
         entries: List[Dict[str, float]] = []
-        for jdx in top_indices:
-            score = float(row[jdx])
-            if score <= 0:
-                continue
-            neighbor_id = int(item_ids[jdx])
-            if neighbor_id == item_id:
-                continue
-            entries.append({"dataset_id": neighbor_id, "score": score})
+        neighbor_scores = similarity.get(item_id, {})
+        if neighbor_scores:
+            sorted_neighbors = sorted(
+                neighbor_scores.items(),
+                key=lambda x: x[1],
+                reverse=True,
+            )
+            for neighbor_id, score in sorted_neighbors:
+                if neighbor_id == item_id or score <= 0:
+                    continue
+                entries.append({"dataset_id": int(neighbor_id), "score": float(score)})
+                if len(entries) >= top_k:
+                    break
         neighbors[int(item_id)] = entries
+    # Include any items that might only appear as neighbors but not in dataset_ids
+    for item_id in similarity.keys():
+        if item_id not in neighbors:
+            neighbors[int(item_id)] = []
     return neighbors
 
 
@@ -1261,15 +1256,11 @@ def main() -> None:
     reduce_memory_usage()
 
     LOGGER.info("Training content similarity model (memory-optimized)...")
-    content_model, content_matrix, content_ids, content_meta = train_content_similarity(dataset_features)
+    content_model, content_ids, content_meta = train_content_similarity(dataset_features)
     reduce_memory_usage()
 
     LOGGER.info("Building vector recall index...")
-    vector_recall = build_vector_recall(content_matrix, content_ids, VECTOR_RECALL_K)
-
-    # Free large matrices that are no longer needed
-    del content_matrix
-    reduce_memory_usage()
+    vector_recall = build_vector_recall(content_model, content_ids, VECTOR_RECALL_K)
 
     LOGGER.info("Building popular items list...")
     popular_items = build_popular_items(interactions)
