@@ -1314,9 +1314,11 @@ def main() -> None:
     # Save enriched dataset features with text embeddings
     if not dataset_features.empty:
         # Save only necessary columns (not full embeddings, they're too large)
-        embedding_cols = [col for col in dataset_features.columns if col.startswith("text_embed_")]
-        pca_cols = [col for col in dataset_features.columns if col.startswith("text_pca_")]
         stat_cols = ["text_embed_norm", "text_embed_mean", "text_embed_std"]
+        pca_cols = [col for col in dataset_features.columns if col.startswith("text_pca_")]
+        # Exclude stat columns from embedding_cols to avoid duplication
+        embedding_cols = [col for col in dataset_features.columns
+                         if col.startswith("text_embed_") and col not in stat_cols]
 
         # Keep original columns + embedding features
         base_cols = ["dataset_id", "description", "tag", "price"]
