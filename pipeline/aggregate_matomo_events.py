@@ -235,15 +235,18 @@ def aggregate_events() -> None:
     LOGGER.info("Loading exposure log...")
     exposures = evaluate_v2._load_exposure_log()
     if exposures.empty:
-        raise RuntimeError(
+        LOGGER.warning(
             f"Exposure log missing or empty at {evaluate_v2.EXPOSURE_LOG_PATH}; "
-            "ensure recommendation-api is recording request_id telemetry."
+            "creating empty exposure data. Ensure recommendation-api is recording request_id telemetry."
         )
-    exposures = (
-        exposures.sort_values("timestamp")
-        .drop_duplicates(subset=["request_id", "dataset_id"], keep="first")
-        .reset_index(drop=True)
-    )
+        # Create empty DataFrame with expected schema
+        exposures = pd.DataFrame(columns=["request_id", "dataset_id", "timestamp", "user_id", "page_id", "algorithm_version"])
+    else:
+        exposures = (
+            exposures.sort_values("timestamp")
+            .drop_duplicates(subset=["request_id", "dataset_id"], keep="first")
+            .reset_index(drop=True)
+        )
     _save_dataframe(exposures, EXPOSURES_PATH)
 
     LOGGER.info("Loading Matomo action mappings...")
