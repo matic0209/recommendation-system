@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import pickle
 from dataclasses import dataclass
 from functools import wraps
@@ -292,11 +293,12 @@ class TimeoutManager:
     TIMEOUTS = {
         "redis_get": 0.1,
         "redis_set": 0.2,
-        "model_inference": 1.0,
+        "model_inference": 2.5,
         "database_query": 2.0,
-        "recommendation_total": 5.0,  # Increased from 2.0 to handle slow requests
+        "recommendation_total": 8.0,  # Increased from 5.0 to handle slower requests
         "feature_fetch": 0.5,
     }
+    ENV_PREFIX = "TIMEOUT_"
 
     @classmethod
     def get_timeout(cls, operation: str) -> float:
@@ -307,6 +309,34 @@ class TimeoutManager:
     def set_timeout(cls, operation: str, seconds: float) -> None:
         """Set custom timeout for operation."""
         cls.TIMEOUTS[operation] = seconds
+
+    @classmethod
+    def configure_from_env(cls) -> None:
+        """Allow overriding timeout defaults via environment variables."""
+        for operation in cls.TIMEOUTS:
+            env_var = f"{cls.ENV_PREFIX}{operation.upper()}"
+            raw_value = os.getenv(env_var)
+            if raw_value is None:
+                continue
+            try:
+                seconds = float(raw_value)
+                if seconds <= 0:
+                    raise ValueError("must be positive")
+            except ValueError as exc:
+                LOGGER.warning(
+                    "Ignoring invalid timeout override %s=%s (%s)",
+                    env_var,
+                    raw_value,
+                    exc,
+                )
+                continue
+            cls.TIMEOUTS[operation] = seconds
+            LOGGER.info(
+                "Timeout override: %s=%ss via %s",
+                operation,
+                seconds,
+                env_var,
+            )
 
 
 class HealthChecker:

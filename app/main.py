@@ -65,6 +65,7 @@ from app.sentry_config import (
 EXECUTOR_MAX_WORKERS = int(os.getenv("RECO_THREAD_POOL_WORKERS", "4"))
 EXECUTOR = ThreadPoolExecutor(max_workers=EXECUTOR_MAX_WORKERS)
 SLOW_OPERATION_THRESHOLD = float(os.getenv("SLOW_OPERATION_THRESHOLD", "0.5"))
+TimeoutManager.configure_from_env()
 
 
 class ExperimentFileHandler(FileSystemEventHandler):
