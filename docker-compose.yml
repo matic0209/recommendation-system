@@ -1,10 +1,12 @@
 x-env-file: &default-env
   env_file:
-    # Load production config first (if exists), then fall back to development config
+    # Development and production configs
+    # Later files override earlier ones, so .env.prod overrides .env
     # Production: docker-compose --env-file .env.prod up
     # Development: docker-compose up (uses .env)
-    - .env
-    - .env.memory
+    - .env         # Development defaults
+    - .env.memory  # Memory optimization settings
+    - .env.prod    # Production overrides (loaded last, takes priority)
 
 services:
   redis:
