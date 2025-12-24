@@ -99,7 +99,10 @@ with DAG(
 
     extract_load = BashOperator(
         task_id="extract_load",
-        bash_command="python -m pipeline.extract_load",
+        bash_command=(
+            "python -m pipeline.extract_load "
+            "{% if dag_run and dag_run.conf.get('full_refresh') %}--full-refresh{% endif %}"
+        ),
         env=None,
     )
 
@@ -111,6 +114,16 @@ with DAG(
     data_quality = BashOperator(
         task_id="data_quality",
         bash_command="python -m pipeline.data_quality_v2",
+    )
+
+    aggregate_matomo_events = BashOperator(
+        task_id="aggregate_matomo_events",
+        bash_command="python -m pipeline.aggregate_matomo_events",
+    )
+
+    build_training_labels = BashOperator(
+        task_id="build_training_labels",
+        bash_command="python -m pipeline.build_training_labels",
     )
 
     train_models = BashOperator(
@@ -125,7 +138,7 @@ with DAG(
 
     evaluate = BashOperator(
         task_id="evaluate",
-        bash_command="python -m pipeline.evaluate",
+        bash_command="python -m pipeline.evaluate_v2",
     )
 
     train_channel_weights = BashOperator(
@@ -140,4 +153,15 @@ with DAG(
 
     # Note: image_embeddings task removed - visual features are optional and require sentence-transformers
     # Statistical image features are still included in build_features
-    extract_load >> build_features >> data_quality >> train_models >> recall_engine >> evaluate >> train_channel_weights >> reconcile_metrics
+    (
+        extract_load
+        >> build_features
+        >> data_quality
+        >> aggregate_matomo_events
+        >> build_training_labels
+        >> train_models
+        >> recall_engine
+        >> evaluate
+        >> train_channel_weights
+        >> reconcile_metrics
+    )

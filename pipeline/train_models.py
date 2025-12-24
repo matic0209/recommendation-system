@@ -10,6 +10,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Iterable, List, Tuple, Optional
 
+LOGGER = logging.getLogger(__name__)
+
 # Load .env file if running outside Docker (for development/testing)
 # Docker Compose already loads env vars, so this is only for local development
 try:
@@ -79,8 +81,6 @@ from pipeline.memory_optimizer import (
 )
 
 RANKING_CVR_WEIGHT = float(os.getenv("RANKING_CVR_WEIGHT", "0.5"))
-
-LOGGER = logging.getLogger(__name__)
 PROCESSED_DIR = DATA_DIR / "processed"
 REGISTRY_HISTORY_LIMIT = 20
 VECTOR_RECALL_K = 200
@@ -776,7 +776,11 @@ def _prepare_ranking_dataset(
 def _load_ranking_samples() -> pd.DataFrame:
     samples = _load_frame(RANKING_SAMPLES_PATH)
     if samples.empty:
-        LOGGER.warning("Ranking training samples file missing or empty: %s", RANKING_SAMPLES_PATH)
+        raise RuntimeError(
+            f"Ranking training samples missing or empty: {RANKING_SAMPLES_PATH}. "
+            "Run 'python -m pipeline.aggregate_matomo_events' and "
+            "'python -m pipeline.build_training_labels' before training."
+        )
     return samples
 
 
@@ -1320,8 +1324,9 @@ def main() -> None:
         keep_cols.extend([c for c in stat_cols if c in dataset_features.columns])
         keep_cols.extend(pca_cols)
         keep_cols.extend(embedding_cols)
-
-        dataset_features_to_save = dataset_features[keep_cols]
+        deduped_cols = list(dict.fromkeys(keep_cols))
+        dataset_features_dedup = dataset_features.loc[:, ~dataset_features.columns.duplicated()]
+        dataset_features_to_save = dataset_features_dedup[deduped_cols]
         dataset_features_to_save.to_parquet(dataset_features_enriched_path, index=False)
         LOGGER.info("Saved enriched dataset features to %s", dataset_features_enriched_path)
     if ranking_model is not None:
