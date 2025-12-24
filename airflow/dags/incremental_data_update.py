@@ -73,7 +73,11 @@ with DAG(
 
     reload_api = BashOperator(
         task_id="reload_api_models",
-        bash_command="curl -X POST http://recommendation-api:8000/models/reload",
+        bash_command=(
+            "curl -sS -X POST http://recommendation-api:8000/models/reload "
+            "-H 'Content-Type: application/json' "
+            "-d '{\"mode\": \"primary\"}'"
+        ),
     )
 
     clear_cache = PythonOperator(
