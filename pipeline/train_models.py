@@ -776,10 +776,12 @@ def _prepare_ranking_dataset(
 def _load_ranking_samples() -> pd.DataFrame:
     samples = _load_frame(RANKING_SAMPLES_PATH)
     if samples.empty:
-        raise RuntimeError(
-            f"Ranking training samples missing or empty: {RANKING_SAMPLES_PATH}. "
+        LOGGER.warning(
+            "Ranking training samples missing or empty: %s. "
+            "Ranking model training will be skipped. "
             "Run 'python -m pipeline.aggregate_matomo_events' and "
-            "'python -m pipeline.build_training_labels' before training."
+            "'python -m pipeline.build_training_labels' to generate training samples.",
+            RANKING_SAMPLES_PATH,
         )
     return samples
 
