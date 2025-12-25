@@ -5,6 +5,7 @@ that previously caused OOM errors.
 """
 import gc
 import logging
+import os
 from typing import Dict, List, Tuple, Union
 
 import numpy as np
@@ -184,51 +185,63 @@ def build_sparse_similarity_matrix(
         from sklearn.preprocessing import normalize
         image_vectors = normalize(image_vectors, norm='l2')
 
-        # Compute similarities separately and combine in batches
+        # MEMORY-OPTIMIZED: Process row-by-row to avoid large temporary matrices
         n_items = text_matrix.shape[0]
         combined_similarity = {}
 
-        for batch_start in range(0, n_items, batch_size):
-            batch_end = min(batch_start + batch_size, n_items)
+        # Use smaller micro-batch size to reduce memory footprint
+        micro_batch_size = int(os.getenv("SIMILARITY_MICRO_BATCH_SIZE", "50"))
 
-            # Text similarity for batch
-            text_batch = text_matrix[batch_start:batch_end]
-            text_sim = cosine_similarity(text_batch, text_matrix)
+        LOGGER.info(
+            "Computing similarity in micro-batches (total=%d, micro_batch_size=%d, top_k=%d)",
+            n_items,
+            micro_batch_size,
+            top_k
+        )
 
-            # Image similarity for batch
-            image_batch = image_vectors[batch_start:batch_end]
-            image_sim = cosine_similarity(image_batch, image_vectors)
+        for batch_start in range(0, n_items, micro_batch_size):
+            batch_end = min(batch_start + micro_batch_size, n_items)
 
-            # Combine
-            batch_combined = (1 - image_weight) * text_sim + image_weight * image_sim
+            # Process in very small chunks to minimize peak memory
+            for idx in range(batch_start, batch_end):
+                # Text similarity for single item
+                text_row = text_matrix[idx:idx+1]
+                text_scores = cosine_similarity(text_row, text_matrix)[0]
 
-            # Extract top K for each item in batch
-            for local_idx in range(batch_combined.shape[0]):
-                global_idx = batch_start + local_idx
-                scores = batch_combined[local_idx]
-                scores[global_idx] = 0  # Remove self-similarity
+                # Image similarity for single item
+                image_row = image_vectors[idx:idx+1]
+                image_scores = cosine_similarity(image_row, image_vectors)[0]
 
-                # Get top K
-                if top_k < len(scores):
-                    top_indices = np.argpartition(scores, -top_k)[-top_k:]
-                    top_indices = top_indices[np.argsort(scores[top_indices])[::-1]]
+                # Combine scores
+                combined_scores = (1 - image_weight) * text_scores + image_weight * image_scores
+                combined_scores[idx] = 0  # Remove self-similarity
+
+                # Get top K efficiently
+                if top_k < len(combined_scores):
+                    top_indices = np.argpartition(combined_scores, -top_k)[-top_k:]
+                    top_indices = top_indices[np.argsort(combined_scores[top_indices])[::-1]]
                 else:
-                    top_indices = np.argsort(scores)[::-1]
+                    top_indices = np.argsort(combined_scores)[::-1]
 
-                # Store
+                # Store only significant similarities
                 similar_items = {}
-                for idx in top_indices:
-                    score = float(scores[idx])
+                for neighbor_idx in top_indices:
+                    score = float(combined_scores[neighbor_idx])
                     if score > 0.01:
-                        similar_items[int(idx)] = score
+                        similar_items[int(neighbor_idx)] = score
 
                 if similar_items:
-                    combined_similarity[global_idx] = similar_items
+                    combined_similarity[idx] = similar_items
 
-            # Free memory
-            del text_sim, image_sim, batch_combined
-            if (batch_start // batch_size) % 5 == 0:
+                # Clean up temporary arrays
+                del text_scores, image_scores, combined_scores
+
+            # Periodic garbage collection
+            if (batch_start // micro_batch_size) % 10 == 0:
                 gc.collect()
+                if (batch_start // micro_batch_size) % 50 == 0:
+                    progress = 100.0 * batch_end / n_items
+                    LOGGER.info("Progress: %d/%d items (%.1f%%)", batch_end, n_items, progress)
 
         modalities = 2
         embedding_dim = image_vectors.shape[1]
