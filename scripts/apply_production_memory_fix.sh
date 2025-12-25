@@ -70,9 +70,17 @@ else
 SIMILARITY_MICRO_BATCH_SIZE=50
 SIMILARITY_TOP_K=200
 
-# 如果仍然内存不足，可以降低以下值：
-# SIMILARITY_MICRO_BATCH_SIZE=20
-# SIMILARITY_TOP_K=100
+# 排序数据准备优化 - 避免 merge 内存爆炸
+MAX_RANKING_SAMPLES=0
+
+# 如果仍然内存不足（如 150GB 限制），可以：
+# 1. 降低相似度计算参数：
+#    SIMILARITY_MICRO_BATCH_SIZE=20
+#    SIMILARITY_TOP_K=100
+#
+# 2. 限制排序样本数（推荐先尝试这个）：
+#    MAX_RANKING_SAMPLES=5000000    # 500万样本
+#    MAX_RANKING_SAMPLES=2000000    # 200万样本（更激进）
 EOF
 fi
 

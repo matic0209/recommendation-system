@@ -835,21 +835,47 @@ def _prepare_request_ranking_data(
     if samples.empty or dataset_profile.empty:
         return pd.DataFrame(), pd.Series(dtype=int), [], {}
 
-    working = samples.copy()
-    working = working.dropna(subset=["request_id", "dataset_id"])
+    # MEMORY OPTIMIZATION: Avoid copy(), work in-place when possible
+    LOGGER.info("Preparing ranking data (samples: %d rows, datasets: %d)", len(samples), len(dataset_profile))
+
+    working = samples.dropna(subset=["request_id", "dataset_id"])
     working["dataset_id"] = working["dataset_id"].astype(int)
 
-    enriched = working.merge(dataset_profile, on="dataset_id", how="left")
+    # MEMORY OPTIMIZATION: Select only numeric columns from dataset_profile before merge
+    # This avoids merging hundreds of unnecessary columns
+    dataset_numeric_cols = [
+        col
+        for col in dataset_profile.columns
+        if col != "dataset_id" and pd.api.types.is_numeric_dtype(dataset_profile[col])
+    ]
+    dataset_profile_slim = dataset_profile[["dataset_id"] + dataset_numeric_cols]
+
+    LOGGER.info("Merging with dataset features (%d columns)...", len(dataset_numeric_cols))
+    enriched = working.merge(dataset_profile_slim, on="dataset_id", how="left")
+
+    # Free memory immediately
+    del working, dataset_profile_slim
+    gc.collect()
 
     if not user_features.empty and "user_id" in user_features.columns:
         numeric_cols = [
             col for col in user_features.columns
             if col != "user_id" and pd.api.types.is_numeric_dtype(user_features[col])
         ]
-        user_numeric = user_features[["user_id"] + numeric_cols].copy()
+        user_numeric = user_features[["user_id"] + numeric_cols]
         rename_map = {col: f"user_{col}" for col in numeric_cols}
         user_numeric = user_numeric.rename(columns=rename_map)
+
+        LOGGER.info("Merging with user features (%d columns)...", len(numeric_cols))
         enriched = enriched.merge(user_numeric, on="user_id", how="left")
+
+        # Free memory immediately
+        del user_numeric
+        gc.collect()
+
+    # MEMORY OPTIMIZATION: Optimize memory before expensive operations
+    LOGGER.info("Optimizing enriched DataFrame memory usage...")
+    enriched = optimize_dataframe_memory(enriched)
 
     enriched = enriched.sort_values(["request_id", "position"])
     target = enriched["label"].fillna(0).astype(int)
@@ -869,11 +895,7 @@ def _prepare_request_ranking_data(
         "locale",
     ]
 
-    dataset_numeric_cols = [
-        col
-        for col in dataset_profile.columns
-        if col != "dataset_id" and pd.api.types.is_numeric_dtype(dataset_profile[col])
-    ]
+    # Reuse the already computed dataset_numeric_cols list
     numeric_features.extend(dataset_numeric_cols)
 
     user_numeric_cols = [
@@ -884,15 +906,18 @@ def _prepare_request_ranking_data(
     numeric_features = sorted(set(numeric_features))
     categorical_features = sorted(set(categorical_features))
 
+    # MEMORY OPTIMIZATION: Process columns in-place instead of creating copies
     for col in numeric_features:
         if col not in enriched.columns:
             enriched[col] = 0.0
-        enriched[col] = pd.to_numeric(enriched[col], errors="coerce").fillna(0.0)
+        else:
+            enriched[col] = pd.to_numeric(enriched[col], errors="coerce").fillna(0.0)
 
     for col in categorical_features:
         if col not in enriched.columns:
             enriched[col] = "unknown"
-        enriched[col] = enriched[col].fillna("unknown").astype("category")
+        else:
+            enriched[col] = enriched[col].fillna("unknown").astype("category")
 
     feature_info = {
         "numeric": numeric_features,
@@ -909,7 +934,11 @@ def _prepare_request_ranking_data(
     enriched["request_id"] = enriched["request_id"].astype(str)
     feature_columns = feature_info["numeric"] + feature_info["categorical"]
     required_cols = ["request_id", "dataset_id"] + feature_columns
-    reduced = enriched[required_cols].copy()
+
+    # MEMORY OPTIMIZATION: Use column selection instead of copy()
+    reduced = enriched[required_cols]
+
+    LOGGER.info("Ranking data prepared: %d rows, %d features", len(reduced), len(feature_columns))
 
     return reduced, target.astype(int), group_sizes, feature_info
 
@@ -1363,7 +1392,25 @@ def main() -> None:
     LOGGER.info("Building popular items list...")
     popular_items = build_popular_items(interactions)
 
+    # MEMORY OPTIMIZATION: Optimize ranking samples immediately after loading
+    LOGGER.info("Loading ranking samples...")
     ranking_samples = _load_ranking_samples()
+    if not ranking_samples.empty:
+        LOGGER.info("Ranking samples: %d rows before optimization", len(ranking_samples))
+
+        # MEMORY OPTIMIZATION: Optional sampling to reduce memory footprint
+        max_samples = int(os.getenv("MAX_RANKING_SAMPLES", "0"))
+        if max_samples > 0 and len(ranking_samples) > max_samples:
+            LOGGER.warning(
+                "Sampling ranking data: %d -> %d rows (set MAX_RANKING_SAMPLES=0 to disable)",
+                len(ranking_samples),
+                max_samples
+            )
+            ranking_samples = ranking_samples.sample(n=max_samples, random_state=42)
+
+        ranking_samples = optimize_dataframe_memory(ranking_samples)
+        LOGGER.info("Ranking samples optimized: %d rows", len(ranking_samples))
+
     user_features = _load_frame(USER_FEATURES_PATH)
     if not user_features.empty:
         user_features = optimize_dataframe_memory(user_features)
@@ -1373,6 +1420,8 @@ def main() -> None:
         dataset_stats,
         slot_metrics,
     )
+
+    LOGGER.info("Preparing request ranking data...")
     (
         request_feature_frame,
         ranking_target,
@@ -1383,6 +1432,10 @@ def main() -> None:
         dataset_profile,
         user_features,
     )
+
+    # MEMORY OPTIMIZATION: Free large DataFrames immediately after use
+    del ranking_samples, dataset_profile, user_features
+    reduce_memory_usage()
     ranking_model, ranking_metric = _train_lightgbm_ranker(
         request_feature_frame,
         ranking_target,

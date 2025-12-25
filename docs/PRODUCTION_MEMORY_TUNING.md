@@ -38,9 +38,14 @@ SIMILARITY_MICRO_BATCH_SIZE=50          # 微批大小（用于进度报告和GC
 SIMILARITY_TOP_K=200                     # 每个 item 保留的 Top-K 邻居数
 SIMILARITY_BATCH_SIZE=1000               # 已废弃，保留仅为兼容性
 
+# 排序训练数据优化（新增 2025-12-25）
+MAX_RANKING_SAMPLES=0                    # 排序样本最大行数，0=不限制
+                                         # 如果内存不足，设置为 5000000（500万）
+
 # 如果内存仍然紧张，可以进一步降低
 # SIMILARITY_MICRO_BATCH_SIZE=20
 # SIMILARITY_TOP_K=100
+# MAX_RANKING_SAMPLES=2000000            # 限制为 200万样本
 ```
 
 ### 3. 内存监控配置

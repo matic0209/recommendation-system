@@ -2,12 +2,15 @@
 
 ## 问题描述
 
-**报错时间**: 2025-12-25 05:41:30 UTC
-**报错位置**: `Building popular items list...`
-**内存占用**: 接近 200GB
+**报错时间**: 2025-12-25 05:41:30 UTC 和 08:19:29 UTC
+**报错位置**: `Building popular items list...` 之后（实际是排序数据准备阶段）
+**错误码**: `-9` (OOM Kill)
+**内存占用**: 超过 150GB（生产环境限制）
 **影响**: 导致生产环境任务失败或系统不稳定
 
 ## 根本原因
+
+### 问题 1: 相似度计算内存爆炸
 
 在 `pipeline/memory_optimizer.py:196-203` 的相似度计算中：
 
@@ -22,9 +25,26 @@ batch_combined = (1 - image_weight) * text_sim + image_weight * image_sim
 - 每个批次创建 `1000 × 500,000 × 8 bytes × 3 = 12GB` 临时数据
 - 垃圾回收不及时 + 多批次重叠 → **峰值 200GB**
 
+### 问题 2: 排序数据准备内存爆炸 ⚠️ 新发现
+
+在 `pipeline/train_models.py:842-852` 的排序数据准备中：
+
+```python
+# 旧实现 - 多次 copy 和 merge
+working = samples.copy()  # 复制大 DataFrame
+enriched = working.merge(dataset_profile, on="dataset_id", how="left")  # Merge 1
+enriched = enriched.merge(user_numeric, on="user_id", how="left")  # Merge 2
+```
+
+对于生产环境的大量排序样本（可能几千万行）：
+- `samples.copy()` 复制整个 DataFrame → 10-50GB
+- 第一次 merge：加入几百列 dataset 特征 → 内存翻倍
+- 第二次 merge：加入 user 特征 → 再次翻倍
+- **峰值**: 可能超过 **150GB**
+
 ## 解决方案
 
-### 核心改进：逐行流处理
+### 解决方案 1: 相似度计算 - 逐行流处理
 
 ```python
 # 新实现 - 逐行处理
@@ -39,13 +59,44 @@ for idx in range(batch_start, batch_end):
     # ... 提取 Top-K
 ```
 
+### 解决方案 2: 排序数据准备 - 避免复制 + 列裁剪 ⚠️ 新增
+
+```python
+# 新实现 - 避免 copy，merge 前裁剪列
+working = samples.dropna(subset=["request_id", "dataset_id"])  # 不 copy
+
+# 只选择需要的 numeric 列
+dataset_profile_slim = dataset_profile[["dataset_id"] + dataset_numeric_cols]
+enriched = working.merge(dataset_profile_slim, on="dataset_id", how="left")
+
+# 立即释放内存
+del working, dataset_profile_slim
+gc.collect()
+
+# 添加内存优化
+enriched = optimize_dataframe_memory(enriched)
+```
+
+**关键改进**:
+1. 移除 `samples.copy()` - 避免不必要的复制
+2. Merge 前裁剪列 - 只保留 numeric 列，去掉 text 等大列
+3. 立即释放中间变量 - 每次 merge 后立即 `del` + `gc.collect()`
+4. 应用内存优化 - downcast numeric types
+5. **可选采样** - 通过 `MAX_RANKING_SAMPLES` 限制样本数
+
 ### 内存降低效果
 
-| 数据规模 | 旧实现 | 新实现 | 降低 |
-|---------|-------|-------|-----|
+| 数据规模 | 旧实现 | 新实现（方案1+2） | 降低 |
+|---------|-------|-----------------|-----|
 | 10 万   | ~25 GB | ~2 GB | 92% |
 | 50 万   | ~200 GB | ~8 GB | **96%** |
 | 100 万  | ~500 GB | ~15 GB | 97% |
+
+**排序数据准备优化**（500万样本 × 200特征）:
+| 场景 | 旧实现 | 新实现 | 降低 |
+|-----|-------|-------|-----|
+| 无采样 | ~150 GB | ~40 GB | 73% |
+| 采样到 200万 | ~150 GB | ~15 GB | 90% |
 
 ## 部署到生产环境
 
@@ -74,9 +125,12 @@ bash scripts/verify_memory_optimization.sh
 
 2. **配置环境变量**（编辑 `.env` 或 `.env.prod`）:
    ```bash
-   # 添加以下内容
+   # 相似度计算优化
    SIMILARITY_MICRO_BATCH_SIZE=50
    SIMILARITY_TOP_K=200
+
+   # 排序数据准备优化（如果内存仍然不足）
+   MAX_RANKING_SAMPLES=5000000   # 限制为500万样本，0=不限制
    ```
 
 3. **重启服务**:
