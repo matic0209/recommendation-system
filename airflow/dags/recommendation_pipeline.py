@@ -96,6 +96,7 @@ with DAG(
     catchup=False,
     tags=["recommendation", "mlops"],
 ) as dag:
+    HEAVY_PIPELINE_POOL = os.getenv("RECSYS_HEAVY_POOL", "recsys_heavy")
 
     extract_load = BashOperator(
         task_id="extract_load",
@@ -104,51 +105,61 @@ with DAG(
             "{% if dag_run and dag_run.conf.get('full_refresh') %}--full-refresh{% endif %}"
         ),
         env=None,
+        pool=HEAVY_PIPELINE_POOL,
     )
 
     build_features = BashOperator(
         task_id="build_features",
         bash_command="python -m pipeline.build_features",
+        pool=HEAVY_PIPELINE_POOL,
     )
 
     data_quality = BashOperator(
         task_id="data_quality",
         bash_command="python -m pipeline.data_quality_v2",
+        pool=HEAVY_PIPELINE_POOL,
     )
 
     aggregate_matomo_events = BashOperator(
         task_id="aggregate_matomo_events",
         bash_command="python -m pipeline.aggregate_matomo_events",
+        pool=HEAVY_PIPELINE_POOL,
     )
 
     build_training_labels = BashOperator(
         task_id="build_training_labels",
         bash_command="python -m pipeline.build_training_labels",
+        pool=HEAVY_PIPELINE_POOL,
     )
 
     train_models = BashOperator(
         task_id="train_models",
         bash_command="python -m pipeline.train_models",
+        pool=HEAVY_PIPELINE_POOL,
     )
 
     recall_engine = BashOperator(
         task_id="recall_engine",
         bash_command="python -m pipeline.recall_engine_v2",
+        pool=HEAVY_PIPELINE_POOL,
     )
 
     evaluate = BashOperator(
         task_id="evaluate",
         bash_command="python -m pipeline.evaluate_v2",
+        pool=HEAVY_PIPELINE_POOL,
     )
 
     train_channel_weights = BashOperator(
         task_id="train_channel_weights",
         bash_command="python -m pipeline.train_channel_weights",
+        pool=HEAVY_PIPELINE_POOL,
     )
 
     reconcile_metrics = BashOperator(
         task_id="reconcile_metrics",
         bash_command="python -m scripts.reconcile_business_metrics --start {{ ds }} --end {{ ds }}",
+        pool=HEAVY_PIPELINE_POOL,
     )
 
     # Note: image_embeddings task removed - visual features are optional and require sentence-transformers

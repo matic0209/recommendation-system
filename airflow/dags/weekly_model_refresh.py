@@ -4,6 +4,7 @@ Airflow DAG: Weekly retraining and deployment using Matomo request-id data.
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+import os
 
 from airflow import DAG
 from airflow.exceptions import AirflowSkipException
@@ -57,40 +58,48 @@ with DAG(
     max_active_runs=1,
     tags=["recommendation", "weekly", "matomo"],
 ) as dag:
+    HEAVY_PIPELINE_POOL = os.getenv("RECSYS_HEAVY_POOL", "recsys_heavy")
 
     aggregate_matomo_events = BashOperator(
         task_id="aggregate_matomo_events",
         bash_command="python -m pipeline.aggregate_matomo_events",
+        pool=HEAVY_PIPELINE_POOL,
     )
 
     build_training_labels = BashOperator(
         task_id="build_training_labels",
         bash_command="python -m pipeline.build_training_labels",
+        pool=HEAVY_PIPELINE_POOL,
     )
 
     verify_training_processed = BashOperator(
         task_id="verify_training_files",
         bash_command="python -m pipeline.verify_processed_files --group training",
+        pool=HEAVY_PIPELINE_POOL,
     )
 
     verify_readiness = PythonOperator(
         task_id="verify_training_readiness",
         python_callable=_check_minimum_data,
+        pool=HEAVY_PIPELINE_POOL,
     )
 
     build_features = BashOperator(
         task_id="build_features",
         bash_command="python -m pipeline.build_features",
+        pool=HEAVY_PIPELINE_POOL,
     )
 
     train_models = BashOperator(
         task_id="train_models",
         bash_command="python -m pipeline.train_models",
+        pool=HEAVY_PIPELINE_POOL,
     )
 
     recall_engine = BashOperator(
         task_id="recall_engine",
         bash_command="python -m pipeline.recall_engine_v2",
+        pool=HEAVY_PIPELINE_POOL,
     )
 
     reload_api_models = BashOperator(
@@ -100,21 +109,25 @@ with DAG(
             "-H 'Content-Type: application/json' "
             "-d '{\"mode\": \"primary\"}'"
         ),
+        pool=HEAVY_PIPELINE_POOL,
     )
 
     evaluate_tracking = BashOperator(
         task_id="evaluate_tracking",
         bash_command="python -m pipeline.evaluate_v2",
+        pool=HEAVY_PIPELINE_POOL,
     )
 
     optimize_experiments = BashOperator(
         task_id="optimize_experiments",
         bash_command="python -m pipeline.variant_optimizer --experiment recommendation_detail --endpoint recommend_detail",
+        pool=HEAVY_PIPELINE_POOL,
     )
 
     verify_matomo_processed = BashOperator(
         task_id="verify_matomo_files",
         bash_command="python -m pipeline.verify_processed_files --group matomo",
+        pool=HEAVY_PIPELINE_POOL,
     )
 
     aggregate_matomo_events >> verify_matomo_processed >> build_training_labels >> verify_training_processed >> verify_readiness >> build_features >> train_models >> recall_engine >> reload_api_models >> evaluate_tracking >> optimize_experiments

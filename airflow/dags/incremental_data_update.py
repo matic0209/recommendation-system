@@ -4,6 +4,7 @@
 """
 
 from datetime import datetime, timedelta
+import os
 
 from airflow import DAG
 from airflow.operators.bash import BashOperator
@@ -50,25 +51,30 @@ with DAG(
     max_active_runs=1,
     tags=["recommend", "incremental", "data-update"],
 ) as dag:
+    HEAVY_PIPELINE_POOL = os.getenv("RECSYS_HEAVY_POOL", "recsys_heavy")
 
     extract_incremental = BashOperator(
         task_id="extract_incremental_data",
         bash_command="python -m pipeline.extract_load",
+        pool=HEAVY_PIPELINE_POOL,
     )
 
     build_features = BashOperator(
         task_id="build_features",
         bash_command="python -m pipeline.build_features",
+        pool=HEAVY_PIPELINE_POOL,
     )
 
     train_models = BashOperator(
         task_id="train_models",
         bash_command="python -m pipeline.train_models",
+        pool=HEAVY_PIPELINE_POOL,
     )
 
     update_recall = BashOperator(
         task_id="update_recall_engine",
         bash_command="python -m pipeline.recall_engine_v2",
+        pool=HEAVY_PIPELINE_POOL,
     )
 
     reload_api = BashOperator(
@@ -78,11 +84,13 @@ with DAG(
             "-H 'Content-Type: application/json' "
             "-d '{\"mode\": \"primary\"}'"
         ),
+        pool=HEAVY_PIPELINE_POOL,
     )
 
     clear_cache = PythonOperator(
         task_id="clear_redis_cache",
         python_callable=flush_redis_cache,
+        pool=HEAVY_PIPELINE_POOL,
     )
 
     extract_incremental >> build_features >> train_models >> update_recall >> [
