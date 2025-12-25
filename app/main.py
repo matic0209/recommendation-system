@@ -17,7 +17,7 @@ from functools import partial
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
 from datetime import datetime, timezone
-from threading import Lock
+from threading import Lock, Thread
 
 import numpy as np
 import pandas as pd
@@ -200,6 +200,7 @@ class HotUserData:
         self._user_history_sets: Dict[int, Set[int]] = {}
         self._user_tag_preferences: Dict[int, Dict[str, float]] = {}
         self._user_profiles: Dict[int, Dict[str, Optional[str]]] = {}
+        self._refreshing = False
 
     def update_dataset_tags(self, dataset_tags: Dict[int, List[str]]) -> None:
         self.dataset_tags = dataset_tags
@@ -225,25 +226,54 @@ class HotUserData:
             return False
         return (time.time() - self._last_refresh) > self.ttl_seconds
 
-    def _refresh_locked(self) -> None:
-        fresh_history = _load_user_history()
-        fresh_profiles = _load_user_profile()
-        self._user_history = fresh_history
-        self._user_profiles = fresh_profiles
-        self._user_history_sets = {
-            user_id: {record["dataset_id"] for record in records}
-            for user_id, records in fresh_history.items()
-        }
-        self._user_tag_preferences = _build_user_tag_preferences(fresh_history, self.dataset_tags)
-        self._last_refresh = time.time()
+    def _run_refresh(self) -> None:
+        """Build a fresh snapshot and atomically swap it in."""
+        try:
+            fresh_history = _load_user_history()
+            fresh_profiles = _load_user_profile()
+            fresh_sets = {
+                user_id: {record["dataset_id"] for record in records}
+                for user_id, records in fresh_history.items()
+            }
+            fresh_tag_preferences = _build_user_tag_preferences(fresh_history, self.dataset_tags)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("Hot user data refresh failed: %s", exc)
+            with self._lock:
+                self._refreshing = False
+            return
+
+        with self._lock:
+            self._user_history = fresh_history
+            self._user_profiles = fresh_profiles
+            self._user_history_sets = fresh_sets
+            self._user_tag_preferences = fresh_tag_preferences
+            self._last_refresh = time.time()
+            self._refreshing = False
         LOGGER.info("Hot user data refreshed (users=%d)", len(fresh_history))
 
-    def ensure_fresh(self, *, force: bool = False) -> None:
-        if not force and self._user_history and not self._is_expired():
-            return
+    def _refresh_blocking(self) -> None:
         with self._lock:
-            if force or not self._user_history or self._is_expired():
-                self._refresh_locked()
+            if self._refreshing:
+                return
+            self._refreshing = True
+        self._run_refresh()
+
+    def _schedule_async_refresh(self) -> None:
+        with self._lock:
+            if self._refreshing:
+                return
+            self._refreshing = True
+        Thread(target=self._run_refresh, daemon=True).start()
+
+    def ensure_fresh(self, *, force: bool = False) -> None:
+        if not self._user_history:
+            self._refresh_blocking()
+            return
+        if force:
+            self._schedule_async_refresh()
+            return
+        if self._is_expired():
+            self._schedule_async_refresh()
 
     def get_history(self) -> Dict[int, List[Dict[str, float]]]:
         self.ensure_fresh()
