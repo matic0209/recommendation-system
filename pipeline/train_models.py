@@ -43,7 +43,7 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LinearRegression, LogisticRegression
 from sklearn.metrics import roc_auc_score, r2_score
 from sklearn.metrics.pairwise import cosine_similarity
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, ParameterSampler
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler, normalize
 
@@ -837,7 +837,7 @@ def _prepare_request_ranking_data(
 
     working = samples.copy()
     working = working.dropna(subset=["request_id", "dataset_id"])
-    working["dataset_id"] = working["dataset_id"].astype(np.int32)
+    working["dataset_id"] = working["dataset_id"].astype(int)
 
     enriched = working.merge(dataset_profile, on="dataset_id", how="left")
 
@@ -887,7 +887,7 @@ def _prepare_request_ranking_data(
     for col in numeric_features:
         if col not in enriched.columns:
             enriched[col] = 0.0
-        enriched[col] = pd.to_numeric(enriched[col], errors="coerce").fillna(0.0).astype(np.float32)
+        enriched[col] = pd.to_numeric(enriched[col], errors="coerce").fillna(0.0)
 
     for col in categorical_features:
         if col not in enriched.columns:
@@ -907,15 +907,11 @@ def _prepare_request_ranking_data(
     )
 
     enriched["request_id"] = enriched["request_id"].astype(str)
-    enriched["dataset_id"] = enriched["dataset_id"].astype(np.int32)
-    enriched["request_id"] = enriched["request_id"].astype("category")
-    enriched["dataset_id"] = enriched["dataset_id"].astype(np.int32)
-
     feature_columns = feature_info["numeric"] + feature_info["categorical"]
     required_cols = ["request_id", "dataset_id"] + feature_columns
     reduced = enriched[required_cols].copy()
 
-    return reduced, target.astype(np.int8), group_sizes, feature_info
+    return reduced, target.astype(int), group_sizes, feature_info
 
 
 def _prepare_ranker_preview_features(
@@ -1008,16 +1004,32 @@ def _train_lightgbm_ranker(
         eval_set = [(X_valid, y_valid)]
         eval_group = [group_valid]
 
-    model = LGBMRanker(
-        objective="lambdarank",
-        metric="ndcg",
-        n_estimators=int(os.getenv("RANKER_ESTIMATORS", "300")),
-        learning_rate=float(os.getenv("RANKER_LEARNING_RATE", "0.05")),
-        num_leaves=int(os.getenv("RANKER_NUM_LEAVES", "63")),
-        subsample=0.8,
-        colsample_bytree=0.8,
-        random_state=42,
-    )
+    base_params = {
+        "objective": "lambdarank",
+        "metric": "ndcg",
+        "n_estimators": int(os.getenv("RANKER_ESTIMATORS", "300")),
+        "learning_rate": float(os.getenv("RANKER_LEARNING_RATE", "0.05")),
+        "num_leaves": int(os.getenv("RANKER_NUM_LEAVES", "63")),
+        "subsample": 0.8,
+        "colsample_bytree": 0.8,
+        "random_state": 42,
+    }
+    param_distributions = {
+        "num_leaves": [31, 63, 127, 255],
+        "learning_rate": [0.03, 0.05, 0.08],
+        "min_child_samples": [20, 40, 80, 120],
+        "subsample": [0.6, 0.8, 1.0],
+        "colsample_bytree": [0.6, 0.8, 1.0],
+        "reg_lambda": [0.0, 0.5, 1.0],
+    }
+    search_trials = max(1, int(os.getenv("RANKER_HYPEROPT_TRIALS", "5")))
+    candidate_params: List[Dict[str, Any]] = [base_params.copy()]
+    if search_trials > 1:
+        sampler = ParameterSampler(param_distributions, n_iter=search_trials - 1, random_state=42)
+        for sample in sampler:
+            params = base_params.copy()
+            params.update({k: float(v) if isinstance(v, np.floating) else v for k, v in sample.items()})
+            candidate_params.append(params)
 
     fit_kwargs = {
         "X": X_train,
@@ -1031,20 +1043,58 @@ def _train_lightgbm_ranker(
         fit_kwargs["eval_at"] = [5, 10]
         fit_kwargs["callbacks"] = [early_stopping(stopping_rounds=30)]
 
-    model.fit(**fit_kwargs)
+    best_model: Optional[LGBMRanker] = None
+    best_metric = -np.inf
+    best_params: Dict[str, Any] = {}
+    tuning_trials: List[Dict[str, Any]] = []
 
-    metric_value = 0.0
-    if eval_set and hasattr(model, "best_score_"):
-        metric_value = model.best_score_["valid_0"].get("ndcg@10", 0.0)
+    for idx, params in enumerate(candidate_params, start=1):
+        trial_model = LGBMRanker(**params)
+        trial_model.fit(**fit_kwargs)
+        metric_value = 0.0
+        if eval_set and hasattr(trial_model, "best_score_"):
+            metric_value = trial_model.best_score_["valid_0"].get("ndcg@10", 0.0)
+        elif hasattr(trial_model, "best_score_"):
+            metric_value = trial_model.best_score_["training"].get("ndcg@10", 0.0)
+        tuning_trials.append({
+            "trial": idx,
+            "params": {k: (float(v) if isinstance(v, (np.floating, np.integer)) else v) for k, v in params.items()},
+            "metric": float(metric_value),
+        })
+        if metric_value >= best_metric:
+            best_metric = metric_value
+            best_model = trial_model
+            best_params = params.copy()
+
+    if best_model is None:
+        LOGGER.warning("LightGBM ranking failed to train; returning empty artifact.")
+        return None, {"name": "ndcg@10", "value": 0.0}
 
     category_mappings = {}
     for col in feature_info["categorical"]:
         categories = list(X[col].cat.categories)
         category_mappings[col] = categories
 
+    feature_importances: List[Dict[str, float]] = []
+    if hasattr(best_model, "feature_importances_"):
+        raw_importances = best_model.feature_importances_
+        total = float(np.sum(raw_importances)) or 1.0
+        feature_importances = sorted(
+            [
+                {
+                    "feature": name,
+                    "importance": float(value),
+                    "normalized": float(value / total),
+                }
+                for name, value in zip(feature_columns, raw_importances)
+            ],
+            key=lambda entry: entry["importance"],
+            reverse=True,
+        )
+
     artifact = {
         "type": "lightgbm_ranker",
-        "model": model,
+        "model": best_model,
         "feature_columns": feature_columns,
         "feature_types": {
             **{col: "numeric" for col in feature_info["numeric"]},
@@ -1054,8 +1104,11 @@ def _train_lightgbm_ranker(
         "category_mappings": category_mappings,
         "trained_at": datetime.now(timezone.utc).isoformat(),
         "user_feature_columns": [col for col in feature_info["numeric"] if col.startswith("user_")],
+        "feature_importances": feature_importances,
+        "best_params": best_params,
+        "tuning_trials": tuning_trials,
     }
-    metric = {"name": "ndcg@10", "value": float(metric_value)}
+    metric = {"name": "ndcg@10", "value": float(max(best_metric, 0.0))}
     return artifact, metric
 
 
@@ -1454,6 +1507,22 @@ def main() -> None:
         )
         artifacts.append(snapshot_path)
         metrics["ranking_top_score"] = float(ranking_snapshot["score"].max())
+
+    if ranking_model and ranking_model.get("feature_importances"):
+        importance_path = MODELS_DIR / "ranking_feature_importance.json"
+        top_importances = ranking_model["feature_importances"][:50]
+        importance_path.write_text(json.dumps(top_importances, ensure_ascii=False, indent=2))
+        artifacts.append(importance_path)
+        params["ranking_top_features"] = ",".join(
+            item["feature"] for item in top_importances[:10]
+        )
+
+    if ranking_model and ranking_model.get("tuning_trials"):
+        trials_path = MODELS_DIR / "ranking_hparam_trials.json"
+        trials_path.write_text(json.dumps(ranking_model["tuning_trials"], ensure_ascii=False, indent=2))
+        artifacts.append(trials_path)
+        params["ranking_best_params"] = json.dumps(ranking_model.get("best_params", {}), ensure_ascii=False)
+        metrics["ranking_tuning_trials"] = float(len(ranking_model["tuning_trials"]))
 
     run_info = _log_to_mlflow(params, metrics, artifacts)
     entry = {
