@@ -446,11 +446,6 @@ def generate_text_embeddings(
 
         LOGGER.info("Text embeddings generated: shape=%s", embeddings.shape)
 
-        # Add statistical features
-        dataset_features["text_embed_norm"] = np.linalg.norm(embeddings, axis=1)
-        dataset_features["text_embed_mean"] = embeddings.mean(axis=1)
-        dataset_features["text_embed_std"] = embeddings.std(axis=1)
-
         # Apply PCA for dimensionality reduction
         LOGGER.info("Applying PCA to reduce embeddings to %d dimensions", n_pca_components)
         pca = PCA(n_components=n_pca_components, random_state=42)
@@ -463,9 +458,17 @@ def generate_text_embeddings(
             explained_variance * 100,
         )
 
-        # Add PCA components as features
-        for i in range(n_pca_components):
-            dataset_features[f"text_pca_{i}"] = embeddings_pca[:, i]
+        # PERFORMANCE: Add all new columns at once to avoid DataFrame fragmentation
+        new_features = pd.DataFrame(
+            {
+                "text_embed_norm": np.linalg.norm(embeddings, axis=1),
+                "text_embed_mean": embeddings.mean(axis=1),
+                "text_embed_std": embeddings.std(axis=1),
+                **{f"text_pca_{i}": embeddings_pca[:, i] for i in range(n_pca_components)},
+            },
+            index=dataset_features.index,
+        )
+        dataset_features = pd.concat([dataset_features, new_features], axis=1)
 
         # NOTE: Full embeddings (384 dims) NOT saved to reduce memory usage
         # Only PCA components (10 dims) are saved for ranking model
