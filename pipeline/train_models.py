@@ -837,7 +837,7 @@ def _prepare_request_ranking_data(
 
     working = samples.copy()
     working = working.dropna(subset=["request_id", "dataset_id"])
-    working["dataset_id"] = working["dataset_id"].astype(int)
+    working["dataset_id"] = working["dataset_id"].astype(np.int32)
 
     enriched = working.merge(dataset_profile, on="dataset_id", how="left")
 
@@ -882,16 +882,17 @@ def _prepare_request_ranking_data(
     numeric_features.extend(user_numeric_cols)
 
     numeric_features = sorted(set(numeric_features))
+    categorical_features = sorted(set(categorical_features))
 
     for col in numeric_features:
         if col not in enriched.columns:
             enriched[col] = 0.0
-        enriched[col] = pd.to_numeric(enriched[col], errors="coerce").fillna(0.0)
+        enriched[col] = pd.to_numeric(enriched[col], errors="coerce").fillna(0.0).astype(np.float32)
 
     for col in categorical_features:
         if col not in enriched.columns:
             enriched[col] = "unknown"
-        enriched[col] = enriched[col].fillna("unknown").astype(str)
+        enriched[col] = enriched[col].fillna("unknown").astype("category")
 
     feature_info = {
         "numeric": numeric_features,
@@ -905,7 +906,16 @@ def _prepare_request_ranking_data(
         .tolist()
     )
 
-    return enriched, target, group_sizes, feature_info
+    enriched["request_id"] = enriched["request_id"].astype(str)
+    enriched["dataset_id"] = enriched["dataset_id"].astype(np.int32)
+    enriched["request_id"] = enriched["request_id"].astype("category")
+    enriched["dataset_id"] = enriched["dataset_id"].astype(np.int32)
+
+    feature_columns = feature_info["numeric"] + feature_info["categorical"]
+    required_cols = ["request_id", "dataset_id"] + feature_columns
+    reduced = enriched[required_cols].copy()
+
+    return reduced, target.astype(np.int8), group_sizes, feature_info
 
 
 def _prepare_ranker_preview_features(
