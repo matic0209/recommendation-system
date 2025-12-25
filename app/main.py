@@ -65,6 +65,8 @@ from app.sentry_config import (
 EXECUTOR_MAX_WORKERS = int(os.getenv("RECO_THREAD_POOL_WORKERS", "4"))
 EXECUTOR = ThreadPoolExecutor(max_workers=EXECUTOR_MAX_WORKERS)
 SLOW_OPERATION_THRESHOLD = float(os.getenv("SLOW_OPERATION_THRESHOLD", "0.5"))
+STAGE_LOG_THRESHOLD = float(os.getenv("STAGE_LOG_THRESHOLD", "0.25"))
+USER_FEATURE_CACHE_TTL = float(os.getenv("USER_FEATURE_CACHE_TTL", "30.0"))
 TimeoutManager.configure_from_env()
 
 
@@ -408,8 +410,15 @@ def _get_user_features(state, user_id: Optional[int]) -> Dict[str, float]:
     feature_store = getattr(state, "feature_store", None)
     if not feature_store:
         return {}
+    cache = getattr(state, "_user_feature_cache", None)
+    now = time.time()
+    user_key = int(user_id)
+    if cache:
+        cached_entry = cache.get(user_key)
+        if cached_entry and now - cached_entry["ts"] < USER_FEATURE_CACHE_TTL:
+            return cached_entry["data"].copy()
     try:
-        raw = feature_store.get_user_features(int(user_id))
+        raw = feature_store.get_user_features(user_key)
     except Exception as exc:  # noqa: BLE001
         LOGGER.warning("Failed to fetch user features for %s: %s", user_id, exc)
         return {}
@@ -419,7 +428,40 @@ def _get_user_features(state, user_id: Optional[int]) -> Dict[str, float]:
             normalized[f"user_{key}"] = float(value)
         except (TypeError, ValueError):
             continue
+    if cache is None:
+        cache = {}
+        setattr(state, "_user_feature_cache", cache)
+    cache[user_key] = {"ts": now, "data": normalized.copy()}
     return normalized
+
+
+def _log_stage_duration(
+    stage: str,
+    start_time: float,
+    *,
+    dataset_id: Optional[int],
+    user_id: Optional[int],
+    request_id: Optional[str],
+) -> None:
+    duration = time.perf_counter() - start_time
+    if duration < STAGE_LOG_THRESHOLD:
+        LOGGER.debug(
+            "Stage %s finished quickly (%.3fs) dataset=%s user=%s request=%s",
+            stage,
+            duration,
+            dataset_id,
+            user_id,
+            request_id,
+        )
+        return
+    LOGGER.info(
+        "Stage %s duration=%.3fs dataset=%s user=%s request=%s",
+        stage,
+        duration,
+        dataset_id,
+        user_id,
+        request_id,
+    )
 
 
 @app.middleware("http")
@@ -2419,6 +2461,7 @@ async def get_similar(
                 bundle=local_bundle,
                 state=state,
             )
+            stage_start = time.perf_counter()
             scores, reasons = _combine_scores_with_weights(
                 dataset_id,
                 local_bundle.behavior,
@@ -2706,6 +2749,7 @@ async def recommend_for_detail(
                 bundle=local_bundle,
                 state=state,
             )
+            stage_start = time.perf_counter()
             scores, reasons = _combine_scores_with_weights(
                 dataset_id,
                 local_bundle.behavior,
@@ -2715,6 +2759,15 @@ async def recommend_for_detail(
                 limit,
                 effective_weights,
             )
+            _log_stage_duration(
+                "score_fusion",
+                stage_start,
+                dataset_id=dataset_id,
+                user_id=user_id,
+                request_id=request_id,
+            )
+
+            stage_start = time.perf_counter()
             _apply_personalization(
                 user_id,
                 scores,
@@ -2723,6 +2776,15 @@ async def recommend_for_detail(
                 local_bundle.behavior,
                 state.personalization_history_limit,
             )
+            _log_stage_duration(
+                "personalization",
+                stage_start,
+                dataset_id=dataset_id,
+                user_id=user_id,
+                request_id=request_id,
+            )
+
+            stage_start = time.perf_counter()
             _augment_with_multi_channel(
                 state,
                 target_id=dataset_id,
@@ -2731,7 +2793,25 @@ async def recommend_for_detail(
                 limit=limit,
                 user_id=user_id,
             )
+            _log_stage_duration(
+                "multi_channel",
+                stage_start,
+                dataset_id=dataset_id,
+                user_id=user_id,
+                request_id=request_id,
+            )
+
+            stage_start = time.perf_counter()
             user_feature_map = _get_user_features(state, user_id)
+            _log_stage_duration(
+                "user_features",
+                stage_start,
+                dataset_id=dataset_id,
+                user_id=user_id,
+                request_id=request_id,
+            )
+
+            stage_start = time.perf_counter()
             await _call_blocking(
                 partial(
                     _apply_ranking,
@@ -2753,12 +2833,27 @@ async def recommend_for_detail(
                 operation="model_inference",
                 timeout=TimeoutManager.get_timeout("model_inference"),
             )
+            _log_stage_duration(
+                "ranking",
+                stage_start,
+                dataset_id=dataset_id,
+                user_id=user_id,
+                request_id=request_id,
+            )
             mmr_lambda = _compute_mmr_lambda(endpoint=endpoint, request_context=request_context)
+            stage_start = time.perf_counter()
             items = _build_response_items(
                 scores, reasons, limit, state.metadata,
                 dataset_tags=state.dataset_tags,
                 apply_mmr=True,
                 mmr_lambda=mmr_lambda,
+            )
+            _log_stage_duration(
+                "response_build",
+                stage_start,
+                dataset_id=dataset_id,
+                user_id=user_id,
+                request_id=request_id,
             )
             return items, reasons, local_variant, local_bundle.run_id, effective_weights
 
