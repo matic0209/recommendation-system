@@ -1735,6 +1735,133 @@ def _apply_personalization(
                 reasons[dataset_id] = f"{base_reason}+personalized"
 
 
+def _ensure_dataset_index(frame: pd.DataFrame) -> pd.DataFrame:
+    """Ensure DataFrame is indexed by dataset_id without mutating original."""
+    if frame is None or frame.empty:
+        return pd.DataFrame()
+    if frame.index.name == "dataset_id":
+        return frame
+    if "dataset_id" in frame.columns:
+        return frame.set_index("dataset_id")
+    return frame
+
+
+def _build_static_ranking_features(
+    dataset_ids: List[int],
+    raw_features: pd.DataFrame,
+    dataset_stats: pd.DataFrame,
+    slot_metrics_aggregated: pd.DataFrame,
+    feature_overrides: Optional[pd.DataFrame] = None,
+    stats_overrides: Optional[pd.DataFrame] = None,
+) -> pd.DataFrame:
+    """Compute dataset-level static ranking features."""
+    if not dataset_ids:
+        return pd.DataFrame()
+
+    raw_indexed = _ensure_dataset_index(raw_features)
+    selected = raw_indexed.reindex(dataset_ids)
+    if selected.empty:
+        selected = pd.DataFrame(index=dataset_ids)
+    selected = selected.copy()
+    selected["price"] = pd.to_numeric(selected.get("price"), errors="coerce").fillna(0.0)
+    selected["description"] = selected.get("description", "").fillna("").astype(str)
+    selected["tag"] = selected.get("tag", "").fillna("").astype(str)
+
+    if feature_overrides is not None and not feature_overrides.empty:
+        overrides = _ensure_dataset_index(feature_overrides).reindex(dataset_ids)
+        selected = overrides.combine_first(selected)
+
+    selected["description_length"] = selected.get("description", "").str.len().fillna(0.0).astype(float)
+    selected["tag_count"] = selected.get("tag", "").apply(
+        lambda text: float(len([t for t in str(text).split(';') if t.strip()])) if isinstance(text, str) else 0.0
+    )
+
+    stats_indexed = _ensure_dataset_index(dataset_stats)
+    stats = stats_indexed.reindex(dataset_ids)
+    if stats.empty:
+        stats = pd.DataFrame(index=dataset_ids)
+    stats = stats.copy()
+    stats["interaction_count"] = pd.to_numeric(stats.get("interaction_count"), errors="coerce").fillna(0.0)
+    stats["total_weight"] = pd.to_numeric(stats.get("total_weight"), errors="coerce").fillna(0.0)
+
+    if stats_overrides is not None and not stats_overrides.empty:
+        overrides = _ensure_dataset_index(stats_overrides).reindex(dataset_ids)
+        overrides = overrides.apply(pd.to_numeric, errors="coerce")
+        stats = overrides.combine_first(stats).fillna(0.0)
+
+    features = pd.DataFrame(index=dataset_ids)
+    features["price_log"] = np.log1p(selected["price"].clip(lower=0.0))
+    features["description_length"] = selected["description_length"].fillna(0.0)
+    features["tag_count"] = selected["tag_count"].fillna(0.0)
+    features["weight_log"] = np.log1p(stats["total_weight"].clip(lower=0.0))
+    features["interaction_count"] = stats["interaction_count"].fillna(0.0)
+
+    if not stats.empty and "interaction_count" in stats.columns:
+        features["popularity_rank"] = stats["interaction_count"].rank(ascending=False, method="dense").fillna(0.0)
+        features["popularity_percentile"] = stats["interaction_count"].rank(pct=True).fillna(0.5)
+    else:
+        features["popularity_rank"] = 0.0
+        features["popularity_percentile"] = 0.5
+
+    features["price_bucket"] = pd.cut(
+        selected["price"],
+        bins=[-np.inf, 0.5, 1.0, 2.0, 5.0, np.inf],
+        labels=[0, 1, 2, 3, 4]
+    ).astype(float).fillna(0.0)
+
+    features["days_since_last_interaction"] = 30.0
+    features["interaction_density"] = features["interaction_count"] / 30.0
+    features["has_description"] = (features["description_length"] > 0).astype(float)
+    features["has_tags"] = (features["tag_count"] > 0).astype(float)
+    features["content_richness"] = features["description_length"] * features["tag_count"]
+
+    optional_columns = ["image_richness_score", "image_embed_norm", "has_images", "has_cover"]
+    for col in optional_columns:
+        if col in selected.columns:
+            features[col] = pd.to_numeric(selected[col], errors="coerce").fillna(0.0)
+        else:
+            features[col] = 0.0
+
+    slot_indexed = _ensure_dataset_index(slot_metrics_aggregated)
+    slot_columns = [
+        "slot_total_exposures",
+        "slot_total_clicks",
+        "slot_total_conversions",
+        "slot_total_revenue",
+        "slot_mean_ctr",
+        "slot_max_ctr",
+        "slot_mean_cvr",
+        "slot_position_coverage",
+        "slot_ctr_top1",
+        "slot_ctr_top3",
+        "slot_cvr_top1",
+        "slot_cvr_top3",
+    ]
+    if not slot_indexed.empty:
+        slot_data = slot_indexed.reindex(dataset_ids)
+        for col in slot_columns:
+            if col in slot_data.columns:
+                features[col] = pd.to_numeric(slot_data[col], errors="coerce").fillna(0.0)
+            else:
+                features[col] = 0.0
+    else:
+        for col in slot_columns:
+            features[col] = 0.0
+
+    text_embedding_columns = ["text_embed_norm", "text_embed_mean", "text_embed_std"]
+    for col in text_embedding_columns:
+        if col in selected.columns:
+            features[col] = pd.to_numeric(selected[col], errors="coerce").fillna(0.0)
+        else:
+            features[col] = 0.0
+
+    pca_columns = [col for col in selected.columns if col.startswith("text_pca_")]
+    for col in pca_columns:
+        features[col] = pd.to_numeric(selected[col], errors="coerce").fillna(0.0)
+
+    return features
+
+
 def _compute_ranking_features(
     dataset_ids: List[int],
     raw_features: pd.DataFrame,
@@ -1750,136 +1877,70 @@ def _compute_ranking_features(
     experiment_variant: Optional[str] = None,
     request_context: Optional[Dict[str, str]] = None,
     user_features: Optional[Dict[str, float]] = None,
+    precomputed_static: Optional[pd.DataFrame] = None,
+    raw_features_indexed: Optional[pd.DataFrame] = None,
+    dataset_stats_indexed: Optional[pd.DataFrame] = None,
+    slot_metrics_indexed: Optional[pd.DataFrame] = None,
 ) -> pd.DataFrame:
     if not dataset_ids:
         return pd.DataFrame()
 
-    if raw_features.empty:
-        selected = pd.DataFrame(index=dataset_ids)
-        selected["price"] = 0.0
-        selected["description"] = ""
-        selected["tag"] = ""
-    else:
-        selected = raw_features.set_index("dataset_id").reindex(dataset_ids)
-        selected["price"] = pd.to_numeric(selected.get("price"), errors="coerce").fillna(0.0)
-        selected["description"] = selected.get("description", "").fillna("").astype(str)
-        selected["tag"] = selected.get("tag", "").fillna("").astype(str)
+    indexed_raw = raw_features_indexed if raw_features_indexed is not None else raw_features
+    indexed_stats = dataset_stats_indexed if dataset_stats_indexed is not None else dataset_stats
+    indexed_slot = slot_metrics_indexed if slot_metrics_indexed is not None else slot_metrics_aggregated
 
+    if precomputed_static is not None and not precomputed_static.empty:
+        features = precomputed_static.reindex(dataset_ids).copy()
+        missing_mask = features.isnull().all(axis=1)
+        missing_ids = features.index[missing_mask].tolist()
+        if missing_ids:
+            filled = _build_static_ranking_features(
+                missing_ids,
+                indexed_raw,
+                indexed_stats,
+                indexed_slot,
+            )
+            features.loc[missing_ids] = filled
+    else:
+        features = _build_static_ranking_features(
+            dataset_ids,
+            indexed_raw,
+            indexed_stats,
+            indexed_slot,
+        )
+
+    override_feature_df = None
+    override_stats_df = None
+    override_ids: Set[int] = set()
     realtime_features = _fetch_dataset_features_from_store(feature_store, dataset_ids)
     if realtime_features:
-        store_df = (
+        override_feature_df = (
             pd.DataFrame.from_dict(realtime_features, orient="index")
             .rename_axis("dataset_id")
-            .reindex(dataset_ids)
         )
-        selected = store_df.combine_first(selected)
-
-    selected["description_length"] = selected.get("description", "").str.len().astype(float)
-    selected["tag_count"] = selected.get("tag", "").apply(
-        lambda text: float(len([t for t in text.split(';') if t.strip()])) if isinstance(text, str) else 0.0
-    )
-
-    if dataset_stats.empty:
-        stats = pd.DataFrame(index=dataset_ids)
-        stats["interaction_count"] = 0.0
-        stats["total_weight"] = 0.0
-    else:
-        stats = dataset_stats.set_index("dataset_id").reindex(dataset_ids)
-        stats["interaction_count"] = pd.to_numeric(stats.get("interaction_count"), errors="coerce").fillna(0.0)
-        stats["total_weight"] = pd.to_numeric(stats.get("total_weight"), errors="coerce").fillna(0.0)
-
+        override_feature_df.index = override_feature_df.index.astype(int)
+        override_ids.update(int(idx) for idx in override_feature_df.index)
     realtime_stats = _fetch_dataset_stats_from_store(feature_store, dataset_ids)
     if realtime_stats:
-        stats_updates = (
+        override_stats_df = (
             pd.DataFrame.from_dict(realtime_stats, orient="index")
             .rename_axis("dataset_id")
-            .reindex(dataset_ids)
-            .apply(pd.to_numeric, errors="coerce")
         )
-        stats = stats_updates.combine_first(stats)
-        stats = stats.fillna(0.0)
-
-    features = pd.DataFrame(index=dataset_ids)
-    features["price_log"] = np.log1p(selected["price"].clip(lower=0.0))
-    features["description_length"] = selected["description_length"].fillna(0.0)
-    features["tag_count"] = selected["tag_count"].fillna(0.0)
-    features["weight_log"] = np.log1p(stats["total_weight"].clip(lower=0.0))
-    features["interaction_count"] = stats["interaction_count"].fillna(0.0)
-
-    # Add global popularity features
-    if not stats.empty and "interaction_count" in stats.columns:
-        # Compute rank across all datasets in current batch
-        features["popularity_rank"] = stats["interaction_count"].rank(ascending=False, method="dense").fillna(0.0)
-        features["popularity_percentile"] = stats["interaction_count"].rank(pct=True).fillna(0.5)
-    else:
-        features["popularity_rank"] = 0.0
-        features["popularity_percentile"] = 0.5
-
-    # Add price bucket feature
-    features["price_bucket"] = pd.cut(
-        selected["price"],
-        bins=[-np.inf, 0.5, 1.0, 2.0, 5.0, np.inf],
-        labels=[0, 1, 2, 3, 4]
-    ).astype(float).fillna(0.0)
-
-    # Add interaction density features (simplified for inference)
-    features["days_since_last_interaction"] = 30.0  # Default assumption
-    features["interaction_density"] = features["interaction_count"] / 30.0
-
-    # Add text richness features
-    features["has_description"] = (features["description_length"] > 0).astype(float)
-    features["has_tags"] = (features["tag_count"] > 0).astype(float)
-    features["content_richness"] = features["description_length"] * features["tag_count"]
-
-    optional_columns = ["image_richness_score", "image_embed_norm", "has_images", "has_cover"]
-    for col in optional_columns:
-        if col in selected.columns:
-            features[col] = pd.to_numeric(selected[col], errors="coerce").fillna(0.0)
+        override_stats_df.index = override_stats_df.index.astype(int)
+        override_ids.update(int(idx) for idx in override_stats_df.index)
+    if override_ids:
+        refreshed = _build_static_ranking_features(
+            sorted(override_ids),
+            indexed_raw,
+            indexed_stats,
+            indexed_slot,
+            feature_overrides=override_feature_df,
+            stats_overrides=override_stats_df,
+        )
+        if features.empty:
+            features = refreshed
         else:
-            features[col] = 0.0
-
-    # Add slot metrics features from aggregated data
-    slot_columns = [
-        "slot_total_exposures",
-        "slot_total_clicks",
-        "slot_total_conversions",
-        "slot_total_revenue",
-        "slot_mean_ctr",
-        "slot_max_ctr",
-        "slot_mean_cvr",
-        "slot_position_coverage",
-        "slot_ctr_top1",
-        "slot_ctr_top3",
-        "slot_cvr_top1",
-        "slot_cvr_top3",
-    ]
-
-    # Merge slot metrics if available
-    if not slot_metrics_aggregated.empty:
-        slot_data = slot_metrics_aggregated.set_index("dataset_id").reindex(dataset_ids)
-        for col in slot_columns:
-            if col in slot_data.columns:
-                features[col] = pd.to_numeric(slot_data[col], errors="coerce").fillna(0.0)
-            else:
-                features[col] = 0.0
-    else:
-        # Fall back to zeros if no slot metrics available
-        for col in slot_columns:
-            features[col] = 0.0
-
-    # Add text embedding features
-    text_embedding_columns = ["text_embed_norm", "text_embed_mean", "text_embed_std"]
-    for col in text_embedding_columns:
-        if col in selected.columns:
-            features[col] = pd.to_numeric(selected[col], errors="coerce").fillna(0.0)
-        else:
-            features[col] = 0.0
-
-    # Add PCA text embedding features
-    pca_columns = [col for col in selected.columns if col.startswith("text_pca_")]
-    for col in pca_columns:
-        if col in selected.columns:
-            features[col] = pd.to_numeric(selected[col], errors="coerce").fillna(0.0)
+            features.loc[refreshed.index] = refreshed
 
     # Request-level dynamic features
     score_lookup = scores or {}
@@ -2026,6 +2087,11 @@ def _apply_ranking(
     if rank_model is None or not scores:
         return
 
+    try:
+        current_state = _get_app_state()
+    except RuntimeError:
+        current_state = None
+
     dataset_ids = list(scores.keys())
     features = _compute_ranking_features(
         dataset_ids,
@@ -2041,6 +2107,10 @@ def _apply_ranking(
         experiment_variant=experiment_variant,
         request_context=request_context,
         user_features=user_features,
+        precomputed_static=getattr(current_state, "ranking_static_features", None),
+        raw_features_indexed=getattr(current_state, "raw_features_indexed", None),
+        dataset_stats_indexed=getattr(current_state, "dataset_stats_indexed", None),
+        slot_metrics_indexed=getattr(current_state, "slot_metrics_indexed", None),
     )
     if features.empty:
         return
@@ -2179,6 +2249,24 @@ def load_models() -> None:
         dataset_ids=dataset_ids,
     )
     slot_metrics_aggregated = _load_slot_metrics()
+    if not raw_features.empty and "dataset_id" in raw_features.columns:
+        raw_features_indexed = raw_features.set_index("dataset_id")
+    else:
+        raw_features_indexed = pd.DataFrame()
+    if not dataset_stats.empty and "dataset_id" in dataset_stats.columns:
+        dataset_stats_indexed = dataset_stats.set_index("dataset_id")
+    else:
+        dataset_stats_indexed = pd.DataFrame()
+    if not slot_metrics_aggregated.empty and "dataset_id" in slot_metrics_aggregated.columns:
+        slot_metrics_indexed = slot_metrics_aggregated.set_index("dataset_id")
+    else:
+        slot_metrics_indexed = pd.DataFrame()
+    ranking_static_features = _build_static_ranking_features(
+        sorted(dataset_ids),
+        raw_features_indexed,
+        dataset_stats_indexed,
+        slot_metrics_indexed,
+    )
     feature_versions = _load_feature_versions()
     feature_snapshot_id = _compute_feature_snapshot_id(feature_versions)
     user_history = _load_user_history()
@@ -2194,9 +2282,13 @@ def load_models() -> None:
     app.state.shadow_rollout = 0.0
     app.state.metadata = metadata
     app.state.raw_features = raw_features
+    app.state.raw_features_indexed = raw_features_indexed
     app.state.dataset_tags = dataset_tags
     app.state.dataset_stats = dataset_stats
+    app.state.dataset_stats_indexed = dataset_stats_indexed
     app.state.slot_metrics_aggregated = slot_metrics_aggregated
+    app.state.slot_metrics_indexed = slot_metrics_indexed
+    app.state.ranking_static_features = ranking_static_features
     app.state.channel_weights = channel_weight_overrides or {}
     app.state.user_data = user_data_manager
     app.state.user_history = user_history  # Backward compatibility
