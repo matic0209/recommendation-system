@@ -1,6 +1,7 @@
 """Train lightweight recommendation models for dataset detail page suggestions."""
 from __future__ import annotations
 
+import gc
 import json
 import logging
 import pickle
