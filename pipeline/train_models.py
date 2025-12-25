@@ -970,12 +970,15 @@ def _prepare_ranker_preview_features(
 
     for column in feature_columns:
         if feature_types.get(column) == "categorical":
-            working[column] = working[column].fillna("unknown").astype(str)
+            column_values = working[column]
+            if pd.api.types.is_categorical_dtype(column_values.dtype):
+                column_values = column_values.astype("object")
+            column_values = column_values.fillna("unknown").astype(str)
             categories = category_mappings.get(column)
             if categories:
-                working[column] = pd.Categorical(working[column], categories=categories)
+                working[column] = pd.Categorical(column_values, categories=categories)
             else:
-                working[column] = working[column].astype("category")
+                working[column] = column_values.astype("category")
         else:
             working[column] = pd.to_numeric(working[column], errors="coerce").fillna(0.0)
 
