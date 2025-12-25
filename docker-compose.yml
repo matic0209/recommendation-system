@@ -276,6 +276,12 @@ services:
       - "host.docker.internal:host-gateway"
     networks:
       - recommend-net
+    deploy:
+      resources:
+        limits:
+          memory: 150G  # 根据实际服务器资源调整
+        reservations:
+          memory: 30G
 
   prometheus:
     image: prom/prometheus:latest
