@@ -1460,8 +1460,12 @@ def _augment_with_multi_channel(
                 overlap = len(target_set & set(state.dataset_tags.get(candidate, [])))
                 if overlap:
                     candidate_scores[int(candidate)] = candidate_scores.get(int(candidate), 0.0) + overlap
-        for dataset_id, score in sorted(candidate_scores.items(), key=lambda x: x[1], reverse=True)[: limit * 2]:
-            _bump(int(dataset_id), float(score) * 0.4, "tag")
+
+        # 归一化tag分数到[0, 1]，然后乘以权重
+        if candidate_scores:
+            normalized_tag_scores = _normalize_channel_scores(candidate_scores)
+            for dataset_id, norm_score in sorted(normalized_tag_scores.items(), key=lambda x: x[1], reverse=True)[: limit * 2]:
+                _bump(int(dataset_id), norm_score * 0.4, "tag")
 
     # Category recall
     category_index = recall.get("category_index", {})
@@ -1532,6 +1536,32 @@ def _combine_scores(
     )
 
 
+def _normalize_channel_scores(channel_scores: Dict[int, float]) -> Dict[int, float]:
+    """Normalize channel scores to [0, 1] range using Min-Max scaling.
+
+    This ensures all recall channels compete on the same scale, preventing
+    channels with inherently larger scores (e.g., vector: 15-22) from
+    dominating channels with smaller scores (e.g., content: 0.2-0.9).
+
+    Args:
+        channel_scores: Dict mapping item_id to raw channel score
+
+    Returns:
+        Dict mapping item_id to normalized score in [0, 1]
+    """
+    if not channel_scores:
+        return {}
+
+    max_val = max(channel_scores.values())
+    min_val = min(channel_scores.values())
+    range_val = max_val - min_val if max_val > min_val else 1.0
+
+    return {
+        item_id: (score - min_val) / range_val
+        for item_id, score in channel_scores.items()
+    }
+
+
 def _combine_scores_with_weights(
     target_id: int,
     behavior: Dict[int, Dict[int, float]],
@@ -1541,47 +1571,85 @@ def _combine_scores_with_weights(
     limit: int,
     weights: Dict[str, float],
 ) -> tuple[Dict[int, float], Dict[int, str]]:
+    """Combine scores from multiple recall channels with normalization.
+
+    Each channel is independently normalized to [0, 1] before applying weights,
+    ensuring fair competition across channels with different score magnitudes.
+
+    Args:
+        target_id: Target dataset ID for recall
+        behavior: Behavior-based recall results
+        content: Content-based recall results
+        vector: Vector-based recall results
+        popular: Popular items fallback
+        limit: Result limit
+        weights: Channel weights
+
+    Returns:
+        Tuple of (scores dict, reasons dict)
+    """
     scores: Dict[int, float] = {}
     reasons: Dict[int, str] = {}
 
+    # ========== Behavior召回（归一化） ==========
     behavior_scores = behavior.get(target_id, {})
-    for item_id, score in behavior_scores.items():
-        scores[int(item_id)] = float(score) * weights.get("behavior", 1.0)
-        reasons[int(item_id)] = "behavior"
+    if behavior_scores:
+        normalized_behavior = _normalize_channel_scores(behavior_scores)
+        for item_id, norm_score in normalized_behavior.items():
+            scores[int(item_id)] = norm_score * weights.get("behavior", 1.0)
+            reasons[int(item_id)] = "behavior"
 
+    # ========== Content召回（归一化） ==========
     content_scores = content.get(target_id, {})
-    for item_id, score in content_scores.items():
-        item_id = int(item_id)
-        if item_id not in scores:
-            scores[item_id] = float(score) * weights.get("content", 0.5)
-            reasons[item_id] = "content"
-        else:
-            scores[item_id] += float(score) * weights.get("content", 0.5)
+    if content_scores:
+        normalized_content = _normalize_channel_scores(content_scores)
+        for item_id, norm_score in normalized_content.items():
+            item_id = int(item_id)
+            if item_id not in scores:
+                scores[item_id] = norm_score * weights.get("content", 0.5)
+                reasons[item_id] = "content"
+            else:
+                # 如果已有分数（来自其他渠道），累加
+                scores[item_id] += norm_score * weights.get("content", 0.5)
+                reasons[item_id] = f"{reasons[item_id]}+content"
 
-    vector_scores = vector.get(target_id, [])
-    for entry in vector_scores:
+    # ========== Vector召回（归一化） ==========
+    vector_scores_dict = {}
+    for entry in vector.get(target_id, []):
         item_id = int(entry.get("dataset_id", 0))
         if item_id == target_id:
             continue
         score = float(entry.get("score", 0.0))
-        if score <= 0:
-            continue
-        if item_id not in scores:
-            scores[item_id] = score * weights.get("vector", 0.4)
-            reasons[item_id] = "vector"
-        else:
-            scores[item_id] += score * weights.get("vector", 0.4)
-        if len(scores) >= limit * 4:
+        if score > 0:
+            vector_scores_dict[item_id] = score
+        if len(vector_scores_dict) >= limit * 4:
             break
 
+    if vector_scores_dict:
+        normalized_vector = _normalize_channel_scores(vector_scores_dict)
+        for item_id, norm_score in normalized_vector.items():
+            if item_id not in scores:
+                scores[item_id] = norm_score * weights.get("vector", 0.4)
+                reasons[item_id] = "vector"
+            else:
+                scores[item_id] += norm_score * weights.get("vector", 0.4)
+                reasons[item_id] = f"{reasons[item_id]}+vector"
+
+    # ========== Popular召回（归一化） ==========
+    # popular是列表，按排序给分，线性衰减
+    popular_scores = {}
     for idx, item_id in enumerate(popular):
         if item_id == target_id or item_id in scores:
             continue
-        base = max(weights.get("popular", 0.01), 0.0)
-        scores[item_id] = max(base, base - idx * base * 0.01)
-        reasons[item_id] = "popular"
-        if len(scores) >= limit * 5:
+        # 线性衰减：第1个=1.0, 最后一个=0.1
+        popular_scores[item_id] = 1.0 - (idx / max(len(popular), 1)) * 0.9
+        if len(popular_scores) >= limit * 5:
             break
+
+    for item_id, norm_score in popular_scores.items():
+        scores[item_id] = norm_score * weights.get("popular", 0.01)
+        reasons[item_id] = "popular"
+
     scores.pop(target_id, None)
     return scores, reasons
 
@@ -2969,6 +3037,9 @@ async def recommend_for_detail(
                 dataset_tags=state.dataset_tags,
                 apply_mmr=True,
                 mmr_lambda=mmr_lambda,
+                apply_exploration=True,  # 启用探索机制
+                exploration_epsilon=0.15,  # 15%探索率
+                all_dataset_ids=set(state.metadata.keys()),  # 全量dataset池
             )
             _log_stage_duration(
                 "response_build",

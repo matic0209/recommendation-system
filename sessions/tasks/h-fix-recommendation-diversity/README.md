@@ -1188,3 +1188,18 @@ scores[dataset_id] += prob * freshness_boost
 
 ## Work Log
 - [2025-12-25] 任务创建，问题诊断完成，实施方案确定
+- [2025-12-26] **阶段1实施完成**：
+  - ✅ 实现 `_normalize_channel_scores` 归一化函数（Min-Max scaling）
+  - ✅ 重构 `_combine_scores_with_weights` 函数，对所有召回渠道应用归一化
+    - Behavior召回：归一化到[0,1]后乘以权重1.0
+    - Content召回：归一化到[0,1]后乘以权重0.5
+    - Vector召回：归一化到[0,1]后乘以权重0.4
+    - Popular召回：线性衰减归一化后乘以权重0.01
+  - ✅ 修改 `_augment_with_multi_channel` 中tag召回归一化（Category和Price为固定分数无需归一化）
+  - ✅ 启用探索机制：`apply_exploration=True`, `exploration_epsilon=0.15`
+  - ✅ 本地测试验证：
+    - 分数跨度从24.8倍降低到3.3倍（改善7.5倍）✅
+    - Content召回分数（0.800）现可超过Vector召回（0.500）✅
+    - 探索机制正常工作（15%随机探索）✅
+  - **代码改动**：约90行（app/main.py）
+  - **下一步**：阶段2（缓存时间桶 + MMR参数调整）
