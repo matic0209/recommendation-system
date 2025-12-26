@@ -181,10 +181,10 @@ service_info.info({
 
 REQUEST_ID_HEADER = "X-Request-ID"
 DEFAULT_CHANNEL_WEIGHTS = {
-    "behavior": 1.5,  # Increased: strongest personalization signal
-    "content": 0.8,   # Increased: important for relevance
-    "vector": 0.5,    # Slightly increased but relatively lower priority
-    "popular": 0.05,  # Increased: provides diversity
+    "behavior": 1.2,  # 降低（原1.5）- 减少个性化主导，配合归一化
+    "content": 1.0,   # 提升（原0.8）- 增强内容相关性
+    "vector": 0.8,    # 提升（原0.5）- 但仍低于个性化
+    "popular": 0.1,   # 提升（原0.05）- 增加多样性基线
 }
 
 
@@ -313,6 +313,31 @@ def _detect_device_type(user_agent: str) -> str:
     return "unknown"
 
 
+def _get_time_bucket(bucket_hours: int = 1) -> str:
+    """Generate time bucket identifier for cache key.
+
+    This ensures cached results refresh periodically rather than being
+    permanently fixed for the same request parameters.
+
+    Args:
+        bucket_hours: Time bucket granularity in hours (1=hourly, 24=daily)
+
+    Returns:
+        Time bucket string like "2025-12-26-14" (hourly) or "2025-12-26" (daily)
+
+    Examples:
+        >>> _get_time_bucket(1)  # at 14:30
+        "2025-12-26-14"
+        >>> _get_time_bucket(24)
+        "2025-12-26"
+    """
+    now = datetime.now()
+    if bucket_hours == 1:
+        return now.strftime("%Y-%m-%d-%H")  # Hourly bucket
+    else:
+        return now.strftime("%Y-%m-%d")  # Daily bucket
+
+
 def _extract_request_context(request: Request) -> Dict[str, str]:
     headers = request.headers
     source = headers.get("X-Recommend-Source") or request.query_params.get("source") or "unknown"
@@ -328,14 +353,35 @@ def _extract_request_context(request: Request) -> Dict[str, str]:
 
 
 def _compute_mmr_lambda(*, endpoint: str, request_context: Optional[Dict[str, str]]) -> float:
-    base = 0.7 if endpoint == "recommend_detail" else 0.5
+    """Compute MMR lambda parameter for diversity-relevance tradeoff.
+
+    Lambda=0.5 means 50% relevance, 50% diversity (balanced).
+    Lower lambda = more diversity, higher lambda = more relevance.
+
+    Args:
+        endpoint: Recommendation endpoint
+        request_context: Request context with source, device_type, etc.
+
+    Returns:
+        Lambda value in [0.2, 0.6] range
+    """
+    # 降低base从0.7到0.5，提升多样性权重
+    base = 0.5 if endpoint == "recommend_detail" else 0.4
     context = request_context or {}
     source = context.get("source")
-    if source in {"search", "landing"}:
-        base = 0.5
+
+    # 搜索场景：用户有明确意图，适度提升相关性
+    if source == "search":
+        base = 0.6
+    # 浏览场景（landing/home）：强化多样性
+    elif source in {"landing", "home"}:
+        base = 0.3
+
+    # 移动端用户倾向浏览多样化内容，降低相关性权重
     device = context.get("device_type")
     if device == "mobile":
-        base = min(base + 0.1, 0.85)
+        base = max(base - 0.1, 0.2)  # 降低而非提升，上限改为下限
+
     return base
 
 
@@ -2040,6 +2086,28 @@ def _compute_ranking_features(
         else:
             features.loc[refreshed.index] = refreshed
 
+    # Add freshness features from dataset metadata
+    if "days_since_created" in indexed_raw.columns:
+        days_map = indexed_raw["days_since_created"].to_dict()
+        features["content_age_days"] = features.index.to_series().map(
+            lambda dataset_id: float(days_map.get(dataset_id, 999))
+        ).fillna(999.0).astype(float)
+
+        def _compute_freshness_score(days: float) -> float:
+            """Compute freshness score: 1.0 for <=7 days, 0.5 for <=30 days, 0.2 for >30 days."""
+            if days <= 7:
+                return 1.0
+            elif days <= 30:
+                return 0.5
+            else:
+                return 0.2
+
+        features["freshness_score"] = features["content_age_days"].map(_compute_freshness_score).astype(float)
+    else:
+        # Fallback if field not available
+        features["content_age_days"] = 999.0
+        features["freshness_score"] = 0.2
+
     # Request-level dynamic features
     score_lookup = scores or {}
     reason_lookup = reasons or {}
@@ -2156,11 +2224,27 @@ def _apply_ranking_with_circuit_breaker(
     probabilities = _predict_rank_scores(rank_model, features)
     if probabilities.empty:
         return
+
+    # Prepare freshness boost lookup
+    freshness_boost_lookup = {}
+    if "freshness_score" in features.columns:
+        for dataset_id in features.index:
+            freshness_val = features.loc[dataset_id, "freshness_score"]
+            # Boost range: [0.8, 1.0] based on freshness_score [0.2, 1.0]
+            freshness_boost_lookup[int(dataset_id)] = 0.8 + 0.2 * float(freshness_val)
+
     for dataset_id, prob in zip(features.index.astype(int), probabilities.values):
         if dataset_id not in scores:
             continue
         prob = float(prob)
-        scores[dataset_id] += prob
+
+        # Apply freshness boost if available
+        if dataset_id in freshness_boost_lookup:
+            freshness_boost = freshness_boost_lookup[dataset_id]
+            scores[dataset_id] += prob * freshness_boost
+        else:
+            scores[dataset_id] += prob
+
         base_reason = reasons.get(dataset_id, "unknown")
         if "rank" not in base_reason:
             reasons[dataset_id] = f"{base_reason}+rank"
@@ -2908,7 +2992,9 @@ async def recommend_for_detail(
 
     try:
         if cache and cache.enabled and user_id:
-            cache_key = f"recommend:{dataset_id}:{user_id}:{limit}"
+            # 缓存key加入时间桶，每小时刷新
+            time_bucket = _get_time_bucket(bucket_hours=1)
+            cache_key = f"recommend:{dataset_id}:{user_id}:{limit}:{time_bucket}"
             try:
                 cached_result = await _call_blocking(
                     cache.get_json,
@@ -3176,13 +3262,15 @@ async def recommend_for_detail(
         )
 
         if cache and cache.enabled and user_id and degrade_reason is None:
-            cache_key = f"recommend:{dataset_id}:{user_id}:{limit}"
+            # 缓存key加入时间桶，每小时刷新
+            time_bucket = _get_time_bucket(bucket_hours=1)
+            cache_key = f"recommend:{dataset_id}:{user_id}:{limit}:{time_bucket}"
             try:
                 await _call_blocking(
                     cache.set_json,
                     cache_key,
                     response.dict(),
-                    ttl=180,
+                    ttl=3600,  # TTL从180秒改为3600秒（1小时），与时间桶对齐
                     endpoint=endpoint,
                     operation="redis_set",
                     timeout=TimeoutManager.get_timeout("redis_set"),
