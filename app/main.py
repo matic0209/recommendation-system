@@ -184,7 +184,7 @@ DEFAULT_CHANNEL_WEIGHTS = {
     "behavior": 1.2,  # 降低（原1.5）- 减少个性化主导，配合归一化
     "content": 1.0,   # 提升（原0.8）- 增强内容相关性
     "vector": 0.8,    # 提升（原0.5）- 但仍低于个性化
-    "popular": 0.1,   # 提升（原0.05）- 增加多样性基线
+    "popular": 0.02,  # 降低（原0.1）- Popular质量过滤后减少权重，减少负分影响
 }
 
 
@@ -1616,6 +1616,8 @@ def _combine_scores_with_weights(
     popular: List[int],
     limit: int,
     weights: Dict[str, float],
+    *,
+    dataset_features: Optional[pd.DataFrame] = None,
 ) -> tuple[Dict[int, float], Dict[int, str]]:
     """Combine scores from multiple recall channels with normalization.
 
@@ -1630,6 +1632,7 @@ def _combine_scores_with_weights(
         popular: Popular items fallback
         limit: Result limit
         weights: Channel weights
+        dataset_features: Optional DataFrame (indexed by dataset_id) for quality filtering
 
     Returns:
         Tuple of (scores dict, reasons dict)
@@ -1681,16 +1684,38 @@ def _combine_scores_with_weights(
                 scores[item_id] += norm_score * weights.get("vector", 0.4)
                 reasons[item_id] = f"{reasons[item_id]}+vector"
 
-    # ========== Popular召回（归一化） ==========
+    # ========== Popular召回（归一化 + 质量过滤） ==========
     # popular是列表，按排序给分，线性衰减
     popular_scores = {}
+    popular_filtered_count = 0
     for idx, item_id in enumerate(popular):
         if item_id == target_id or item_id in scores:
             continue
+
+        # 质量过滤：过滤低质量Popular item
+        if dataset_features is not None and not dataset_features.empty:
+            if item_id in dataset_features.index:
+                features = dataset_features.loc[item_id]
+                price = features.get('price', 0)
+                interaction_count = features.get('interaction_count', 0)
+                days_inactive = features.get('days_since_last_purchase', 999)
+
+                # 过滤规则：price < 1.90 OR interaction < 66 OR days_inactive > 180
+                if price < 1.90 or interaction_count < 66 or days_inactive > 180:
+                    popular_filtered_count += 1
+                    continue
+
         # 线性衰减：第1个=1.0, 最后一个=0.1
         popular_scores[item_id] = 1.0 - (idx / max(len(popular), 1)) * 0.9
         if len(popular_scores) >= limit * 5:
             break
+
+    # 记录过滤统计
+    if popular_filtered_count > 0:
+        LOGGER.info(
+            f"Popular recall quality filter: filtered {popular_filtered_count} low-quality items, "
+            f"kept {len(popular_scores)} items"
+        )
 
     for item_id, norm_score in popular_scores.items():
         scores[item_id] = norm_score * weights.get("popular", 0.01)
@@ -2303,6 +2328,17 @@ def _apply_ranking(
         LOGGER.warning("Ranking model failed (circuit breaker or error): %s", exc)
         # Continue without ranking - scores already populated from recall
 
+    # 负分硬截断：过滤掉ranking后分数为负的item
+    negative_items = [item_id for item_id, score in scores.items() if score < 0]
+    if negative_items:
+        LOGGER.info(
+            f"Negative score filter: removing {len(negative_items)} items with negative scores "
+            f"(sample: {negative_items[:5]})"
+        )
+        for item_id in negative_items:
+            scores.pop(item_id, None)
+            reasons.pop(item_id, None)
+
 
 def _log_exposure(
     event: str,
@@ -2744,6 +2780,7 @@ async def get_similar(
                 local_bundle.popular,
                 limit,
                 effective_weights,
+                dataset_features=getattr(state, "raw_features_indexed", None),
             )
             _augment_with_multi_channel(
                 state,
@@ -3034,6 +3071,7 @@ async def recommend_for_detail(
                 local_bundle.popular,
                 limit,
                 effective_weights,
+                dataset_features=getattr(state, "raw_features_indexed", None),
             )
             _log_stage_duration(
                 "score_fusion",
