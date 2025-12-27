@@ -1503,7 +1503,8 @@ def _augment_with_multi_channel(
             for candidate in tag_to_items.get(tag, set()):
                 if candidate == target_id:
                     continue
-                overlap = len(target_set & set(state.dataset_tags.get(candidate, [])))
+                candidate_tags = set(tag.lower() for tag in state.dataset_tags.get(candidate, []) if tag)
+                overlap = len(target_set & candidate_tags)
                 if overlap:
                     candidate_scores[int(candidate)] = candidate_scores.get(int(candidate), 0.0) + overlap
 
@@ -1624,15 +1625,20 @@ def _combine_scores_with_weights(
     Each channel is independently normalized to [0, 1] before applying weights,
     ensuring fair competition across channels with different score magnitudes.
 
+    Popular recall includes quality filtering (added 2025-12-27) to remove low-quality items:
+    - Low price + low interaction: price < 1.90 AND interaction_count < 66
+    - Long inactive + low interaction: days_inactive > 180 AND interaction_count < 30
+
     Args:
         target_id: Target dataset ID for recall
         behavior: Behavior-based recall results
         content: Content-based recall results
         vector: Vector-based recall results
-        popular: Popular items fallback
+        popular: Popular items fallback (global hot list)
         limit: Result limit
         weights: Channel weights
-        dataset_features: Optional DataFrame (indexed by dataset_id) for quality filtering
+        dataset_features: Optional DataFrame (indexed by dataset_id) for Popular quality filtering.
+            Must contain columns: ['price', 'interaction_count', 'days_since_last_purchase']
 
     Returns:
         Tuple of (scores dict, reasons dict)
@@ -1688,22 +1694,44 @@ def _combine_scores_with_weights(
     # popular是列表，按排序给分，线性衰减
     popular_scores = {}
     popular_filtered_count = 0
+
+    # 性能优化：批量预查询Popular item的features
+    popular_features_batch = None
+    if dataset_features is not None and not dataset_features.empty:
+        try:
+            popular_ids_in_features = [item_id for item_id in popular if item_id in dataset_features.index]
+            if popular_ids_in_features:
+                popular_features_batch = dataset_features.loc[
+                    popular_ids_in_features,
+                    ['price', 'interaction_count', 'days_since_last_purchase']
+                ]
+        except (KeyError, ValueError):
+            popular_features_batch = None
+
     for idx, item_id in enumerate(popular):
         if item_id == target_id or item_id in scores:
             continue
 
         # 质量过滤：过滤低质量Popular item
-        if dataset_features is not None and not dataset_features.empty:
-            if item_id in dataset_features.index:
-                features = dataset_features.loc[item_id]
-                price = features.get('price', 0)
-                interaction_count = features.get('interaction_count', 0)
-                days_inactive = features.get('days_since_last_purchase', 999)
+        if popular_features_batch is not None and item_id in popular_features_batch.index:
+            try:
+                features = popular_features_batch.loc[item_id]
+                price = float(features['price'])
+                interaction_count = int(features['interaction_count'])
+                days_inactive = float(features['days_since_last_purchase'])
 
-                # 过滤规则：price < 1.90 OR interaction < 66 OR days_inactive > 180
-                if price < 1.90 or interaction_count < 66 or days_inactive > 180:
+                # 过滤规则：组合低质量信号（更精准的AND逻辑）
+                # 1. 低价且无人气：price < 1.90 AND interaction < 66
+                # 2. 长期不活跃且交互少：days_inactive > 180 AND interaction < 30
+                low_price_low_interaction = (price < 1.90 and interaction_count < 66)
+                inactive_low_interaction = (days_inactive > 180 and interaction_count < 30)
+
+                if low_price_low_interaction or inactive_low_interaction:
                     popular_filtered_count += 1
                     continue
+            except (KeyError, ValueError, TypeError):
+                # 数据缺失或类型错误，跳过过滤（保留item）
+                pass
 
         # 线性衰减：第1个=1.0, 最后一个=0.1
         popular_scores[item_id] = 1.0 - (idx / max(len(popular), 1)) * 0.9
@@ -2291,6 +2319,36 @@ def _apply_ranking(
     channel_weights: Dict[str, float],
     user_features: Optional[Dict[str, float]],
 ) -> None:
+    """Apply LightGBM ranker to score candidates and filter negative scores.
+
+    LightGBM ranker outputs raw prediction scores in range (-∞, +∞). Negative scores
+    indicate items predicted to be below average quality.
+
+    Negative score handling (added 2025-12-27):
+    - Hard cutoff: Remove all items with score < 0
+    - Fallback: If all scores are negative, keep top 50% (minimum 5 items)
+    - Logging: Record negative score ratio and filtering count
+
+    Args:
+        scores: Mutable dict of candidate scores (updated in-place)
+        reasons: Mutable dict of recall reasons (updated in-place)
+        rank_model: LightGBM ranker model or Pipeline
+        raw_features: Raw features DataFrame
+        dataset_stats: Dataset statistics DataFrame
+        slot_metrics_aggregated: Slot performance metrics
+        feature_store: Optional Redis feature store
+        endpoint: Request endpoint name
+        variant: Experiment variant
+        experiment_variant: Optional experiment variant override
+        request_context: Optional request context dict
+        channel_weights: Channel weight configuration
+        user_features: Optional user-level features
+
+    Side Effects:
+        - Modifies scores dict in-place (adds ranker predictions)
+        - Removes negative score items from scores and reasons dicts
+        - Logs negative score filtering statistics
+    """
     if rank_model is None or not scores:
         return
 
@@ -2329,15 +2387,30 @@ def _apply_ranking(
         # Continue without ranking - scores already populated from recall
 
     # 负分硬截断：过滤掉ranking后分数为负的item
+    total_items = len(scores)
     negative_items = [item_id for item_id, score in scores.items() if score < 0]
     if negative_items:
-        LOGGER.info(
-            f"Negative score filter: removing {len(negative_items)} items with negative scores "
-            f"(sample: {negative_items[:5]})"
-        )
-        for item_id in negative_items:
-            scores.pop(item_id, None)
-            reasons.pop(item_id, None)
+        negative_ratio = len(negative_items) / total_items * 100 if total_items > 0 else 0
+
+        # 如果全部是负分，保留分数最高的50%作为fallback
+        if len(negative_items) == total_items and total_items > 0:
+            LOGGER.warning(
+                f"All {total_items} items have negative scores! "
+                f"Keeping top 50% by score as fallback"
+            )
+            sorted_items = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+            keep_count = max(5, total_items // 2)  # 至少保留5个
+            keep_ids = {item_id for item_id, _ in sorted_items[:keep_count]}
+            negative_items = [item_id for item_id in negative_items if item_id not in keep_ids]
+
+        if negative_items:
+            LOGGER.info(
+                f"Negative score filter: removing {len(negative_items)}/{total_items} items "
+                f"({negative_ratio:.1f}%) with negative scores (sample: {negative_items[:5]})"
+            )
+            for item_id in negative_items:
+                scores.pop(item_id, None)
+                reasons.pop(item_id, None)
 
 
 def _log_exposure(

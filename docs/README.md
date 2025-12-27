@@ -79,10 +79,52 @@ venv/bin/python -m pipeline.daily_report --date 2025-10-31
 uvicorn app.main:app --reload --port 8000
 ```
 
-## 8. 版本说明
+## 8. 推荐算法核心机制
+
+### 8.1 多渠道召回策略
+
+推荐系统使用四个召回渠道，每个渠道独立归一化后按权重融合：
+
+| 渠道 | 说明 | 权重 | 质量控制 |
+| --- | --- | --- | --- |
+| Behavior | 用户协同过滤 + item-item相似度 | 1.2 | - |
+| Content | 基于标签/描述的TF-IDF相似度 | 1.0 | - |
+| Vector | SBERT语义向量相似度 | 0.8 | - |
+| Popular | 全局热门榜单 | 0.1 | **质量过滤**（2025-12-27新增） |
+
+**Popular召回质量过滤规则**：
+- 过滤低价且无人气: `price < 1.90 AND interaction_count < 66`
+- 过滤长期不活跃且交互少: `days_inactive > 180 AND interaction_count < 30`
+
+### 8.2 排序与负分处理
+
+**LightGBM Ranker特性**：
+- 模型类型: LambdaRank (objective="lambdarank", metric="ndcg")
+- 输出范围: (-∞, +∞) 原始预测分数（非归一化）
+- 负分含义: 模型预测该item质量低于平均水平
+
+**负分硬截断机制**（2025-12-27新增）：
+- 自动过滤所有 `score < 0` 的item
+- Fallback策略: 如全部负分，保留分数最高的50%（至少5个）
+- 监控日志: 记录负分比例和过滤数量
+
+### 8.3 Bug修复记录
+
+**Tag召回大小写bug**（2025-12-27修复）：
+- 问题: 标签大小写不统一导致overlap计算错误
+- 修复: 统一使用lowercase处理target和candidate tags
+- 影响: 提升tag召回准确性
+
+参考实现: `app/main.py` Line 1506-1507, 1688-1750, 2354-2378
+
+## 9. 版本说明
 
 详见 `docs/release_notes.md`，当前版本重点：
 
 - JSON 日报 + Viewer 漏斗展示
 - Prometheus 曝光 / Fallback 实时指标
 - Alertmanager → Notification Gateway → Sentry 联动
+- **推荐质量优化**（2025-12-27）:
+  - Popular召回质量过滤
+  - 负分硬截断机制
+  - Tag召回bug修复
