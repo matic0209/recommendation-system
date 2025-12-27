@@ -148,6 +148,11 @@ Thumbs.db
 logs/
 *.log
 models/*.pkl
+models/sbert/
+*.bin
+*.tar.gz
+*.tar
+paraphrase-*.tar.gz
 
 # Environment configs
 .env.prod

@@ -10,6 +10,7 @@ description: 推荐算法改进、召回策略优化、排序模型调优、多�
 
 ### High Priority
 - `h-fix-recommendation-diversity/` - 修复推荐结果重复和分数断崖问题：召回归一化、探索机制、缓存优化、MMR多样性、新鲜度加权
+- `h-fix-negative-scores-and-mmr-display/` - 修复推荐结果负分和MMR展示混乱问题：过滤负分、修复score展示、优化Popular召回
 
 ### Medium Priority
 <!-- 中优先级任务将在此添加 -->
