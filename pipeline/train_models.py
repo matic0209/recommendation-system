@@ -316,6 +316,186 @@ def train_content_similarity(
     return similarity, item_ids, meta
 
 
+def _apply_quality_filters(
+    candidate_df: pd.DataFrame,
+    available_cols: List[str],
+    min_price: float,
+    min_interaction: int,
+    max_inactive_days: int,
+) -> Tuple[pd.DataFrame, Dict[str, int]]:
+    """
+    应用质量过滤规则并返回过滤后的DataFrame和统计信息
+
+    Args:
+        candidate_df: 候选item DataFrame，包含total_weight和质量字段
+        available_cols: 可用的质量字段列表
+        min_price: 最低价格阈值
+        min_interaction: 最低互动量阈值
+        max_inactive_days: 最大不活跃天数
+
+    Returns:
+        (filtered_df, filter_stats): 过滤后的DataFrame和各维度过滤统计
+    """
+    filter_mask = pd.Series(True, index=candidate_df.index)
+
+    filter_stats = {
+        'low_price': 0,
+        'low_interaction': 0,
+        'inactive': 0,
+    }
+
+    # 分别统计每个字段的缺失情况
+    for col in available_cols:
+        missing_count = int(candidate_df[col].isnull().sum())
+        filter_stats[f'missing_{col}'] = missing_count
+
+    # 应用过滤规则
+    if 'price' in available_cols:
+        low_price_mask = candidate_df['price'].fillna(0) < min_price
+        filter_stats['low_price'] = int(low_price_mask.sum())
+        filter_mask &= ~low_price_mask
+
+    if 'interaction_count' in available_cols:
+        low_interaction_mask = candidate_df['interaction_count'].fillna(0) < min_interaction
+        filter_stats['low_interaction'] = int(low_interaction_mask.sum())
+        filter_mask &= ~low_interaction_mask
+
+    if 'days_since_last_purchase' in available_cols:
+        inactive_mask = candidate_df['days_since_last_purchase'].fillna(9999) > max_inactive_days
+        filter_stats['inactive'] = int(inactive_mask.sum())
+        filter_mask &= ~inactive_mask
+
+    # 应用过滤
+    filtered = candidate_df[filter_mask]
+
+    return filtered, filter_stats
+
+
+def _calculate_quality_metrics(
+    filtered: pd.DataFrame,
+    available_cols: List[str],
+    filter_ratio: float,
+    total_candidates: int,
+) -> Dict[str, float]:
+    """
+    计算过滤后的质量指标，确保健壮性（处理NaN）
+
+    Args:
+        filtered: 过滤后的DataFrame
+        available_cols: 可用的质量字段列表
+        filter_ratio: 过滤比例
+        total_candidates: 总候选数
+
+    Returns:
+        quality_metrics: 质量指标字典
+    """
+    quality_metrics = {
+        'filter_ratio': filter_ratio,
+        'passed_count': len(filtered),
+        'total_candidates': total_candidates,
+    }
+
+    if len(filtered) > 0:
+        if 'price' in available_cols:
+            avg_price = filtered['price'].mean()
+            quality_metrics['avg_price'] = float(avg_price) if not pd.isna(avg_price) else 0.0
+
+        if 'interaction_count' in available_cols:
+            avg_interaction = filtered['interaction_count'].mean()
+            quality_metrics['avg_interaction'] = float(avg_interaction) if not pd.isna(avg_interaction) else 0.0
+
+        if 'days_since_last_purchase' in available_cols:
+            avg_days = filtered['days_since_last_purchase'].mean()
+            quality_metrics['avg_days_inactive'] = float(avg_days) if not pd.isna(avg_days) else 0.0
+    else:
+        # 空DataFrame，设置默认值
+        if 'price' in available_cols:
+            quality_metrics['avg_price'] = 0.0
+        if 'interaction_count' in available_cols:
+            quality_metrics['avg_interaction'] = 0.0
+        if 'days_since_last_purchase' in available_cols:
+            quality_metrics['avg_days_inactive'] = 0.0
+
+    return quality_metrics
+
+
+def _send_quality_alerts(
+    filter_ratio: float,
+    quality_metrics: Dict[str, float],
+    filter_stats: Dict[str, int],
+    filtered_count: int,
+    top_k: int,
+    quality_alert_threshold: float,
+    min_price: float,
+    min_interaction: int,
+    max_inactive_days: int,
+) -> None:
+    """
+    统一发送质量告警，减少Sentry噪音
+
+    Args:
+        filter_ratio: 过滤比例
+        quality_metrics: 质量指标
+        filter_stats: 过滤统计
+        filtered_count: 过滤后数量
+        top_k: 目标数量
+        quality_alert_threshold: 告警阈值
+        min_price: 最低价格阈值
+        min_interaction: 最低互动量阈值
+        max_inactive_days: 最大不活跃天数
+    """
+    # 收集所有告警条件
+    alerts = []
+    alert_details = {}
+
+    if filter_ratio > quality_alert_threshold:
+        alerts.append("high_filter_ratio")
+        alert_details["high_filter_ratio"] = f"过滤比例过高: {filter_ratio*100:.1f}%"
+
+    avg_price = quality_metrics.get('avg_price', 0)
+    if avg_price > 0 and avg_price < 1.0:
+        alerts.append("low_avg_price")
+        alert_details["low_avg_price"] = f"平均价格偏低: {avg_price:.2f}元"
+
+    if filtered_count < top_k * 0.5:
+        alerts.append("insufficient_count")
+        alert_details["insufficient_count"] = f"过滤后数量不足: {filtered_count}/{top_k}"
+
+    # 如果有告警，统一发送
+    if alerts:
+        # 根据告警类型确定严重程度
+        if "insufficient_count" in alerts and filtered_count < 5:
+            severity = "critical"
+        elif "high_filter_ratio" in alerts or "insufficient_count" in alerts:
+            severity = "warning"
+        else:
+            severity = "info"
+
+        track_data_quality_issue(
+            check_name="popular_items_quality_issues",
+            severity=severity,
+            details={
+                "alerts": alerts,
+                "alert_details": alert_details,
+                "filter_breakdown": filter_stats,
+                "quality_metrics": quality_metrics,
+                "thresholds": {
+                    "min_price": min_price,
+                    "min_interaction": min_interaction,
+                    "max_inactive_days": max_inactive_days,
+                    "quality_alert_threshold": quality_alert_threshold,
+                }
+            },
+            metric_value=filter_ratio if "high_filter_ratio" in alerts else filtered_count / top_k,
+            threshold=quality_alert_threshold if "high_filter_ratio" in alerts else 0.5,
+        )
+
+        LOGGER.warning(
+            "Popular quality alerts triggered: %s",
+            ", ".join(alerts)
+        )
+
+
 def build_popular_items(
     interactions: pd.DataFrame,
     dataset_features: Optional[pd.DataFrame] = None,
@@ -325,36 +505,41 @@ def build_popular_items(
     max_inactive_days: int = 730,
     enable_quality_filter: bool = True,
     quality_alert_threshold: float = 0.7,
+    pool_multiplier: int = 3,
 ) -> List[int]:
     """
     构建Popular榜单，带质量过滤
 
     Args:
-        interactions: 用户-item交互数据
-        dataset_features: item特征数据(包含price, interaction_count, days_since_last_purchase)
+        interactions: User-item交互DataFrame
+            Required columns: [user_id, dataset_id, weight, last_event_time]
+        dataset_features: Dataset特征DataFrame (可选)
+            Expected columns: [dataset_id, price, interaction_count, days_since_last_purchase, ...]
         top_k: 返回的item数量
         min_price: 最低价格阈值(默认0.5元)
         min_interaction: 最低互动量阈值(默认10次)
         max_inactive_days: 最大不活跃天数(默认730天=2年)
         enable_quality_filter: 是否启用质量过滤
         quality_alert_threshold: 触发质量告警的过滤比例阈值
+        pool_multiplier: 候选池扩大倍数(默认3倍)，可通过POPULAR_POOL_MULTIPLIER配置
 
     Returns:
-        过滤后的高质量Popular item列表
+        过滤后的高质量Popular item列表(dataset_id的整数列表)
     """
     if interactions.empty:
         LOGGER.warning("Empty interactions, returning empty popular list")
         return []
 
-    # Step 1: 按weight排序，获取候选池(扩大3倍确保过滤后仍有足够item)
-    candidate_pool_size = top_k * 3
+    # Step 1: 按weight排序，获取候选池(扩大N倍确保过滤后仍有足够item)
+    candidate_pool_size = top_k * pool_multiplier
     counts = interactions.groupby("dataset_id")["weight"].sum().sort_values(ascending=False)
     candidates = counts.head(candidate_pool_size)
 
     LOGGER.info(
-        "Popular items candidate pool: %d items (target: %d)",
+        "Popular items candidate pool: %d items (target: %d, multiplier: %d)",
         len(candidates),
-        top_k
+        top_k,
+        pool_multiplier
     )
 
     # Step 2: 如果未提供dataset_features或禁用过滤，直接返回top_k
@@ -384,36 +569,15 @@ def build_popular_items(
     feature_subset = dataset_features.set_index('dataset_id')[available_cols]
     candidate_df = candidate_df.join(feature_subset, how='left')
 
-    # Step 4: 应用质量过滤
-    filter_mask = pd.Series(True, index=candidate_df.index)
+    # Step 4: 应用质量过滤（使用辅助函数）
+    filtered, filter_stats = _apply_quality_filters(
+        candidate_df,
+        available_cols,
+        min_price,
+        min_interaction,
+        max_inactive_days,
+    )
 
-    filter_stats = {
-        'low_price': 0,
-        'low_interaction': 0,
-        'inactive': 0,
-        'missing_features': 0,
-    }
-
-    if 'price' in available_cols:
-        low_price_mask = candidate_df['price'].fillna(0) < min_price
-        filter_stats['low_price'] = int(low_price_mask.sum())
-        filter_mask &= ~low_price_mask
-
-    if 'interaction_count' in available_cols:
-        low_interaction_mask = candidate_df['interaction_count'].fillna(0) < min_interaction
-        filter_stats['low_interaction'] = int(low_interaction_mask.sum())
-        filter_mask &= ~low_interaction_mask
-
-    if 'days_since_last_purchase' in available_cols:
-        inactive_mask = candidate_df['days_since_last_purchase'].fillna(9999) > max_inactive_days
-        filter_stats['inactive'] = int(inactive_mask.sum())
-        filter_mask &= ~inactive_mask
-
-    # 统计缺失特征的item
-    filter_stats['missing_features'] = int(candidate_df[available_cols].isnull().any(axis=1).sum())
-
-    # 应用过滤
-    filtered = candidate_df[filter_mask]
     filtered_count = len(filtered)
     filter_ratio = 1 - (filtered_count / len(candidate_df)) if len(candidate_df) > 0 else 0
 
@@ -424,25 +588,17 @@ def build_popular_items(
         filter_ratio * 100
     )
     LOGGER.info(
-        "  Filtered breakdown: low_price=%d, low_interaction=%d, inactive=%d, missing_features=%d",
-        filter_stats['low_price'],
-        filter_stats['low_interaction'],
-        filter_stats['inactive'],
-        filter_stats['missing_features'],
+        "  Filtered breakdown: %s",
+        ", ".join(f"{k}={v}" for k, v in filter_stats.items())
     )
 
-    # Step 5: 计算质量指标
-    quality_metrics = {}
-    if 'price' in available_cols:
-        quality_metrics['avg_price'] = float(filtered['price'].mean()) if filtered_count > 0 else 0.0
-    if 'interaction_count' in available_cols:
-        quality_metrics['avg_interaction'] = float(filtered['interaction_count'].mean()) if filtered_count > 0 else 0.0
-    if 'days_since_last_purchase' in available_cols:
-        quality_metrics['avg_days_inactive'] = float(filtered['days_since_last_purchase'].mean()) if filtered_count > 0 else 0.0
-
-    quality_metrics['filter_ratio'] = filter_ratio
-    quality_metrics['passed_count'] = filtered_count
-    quality_metrics['total_candidates'] = len(candidate_df)
+    # Step 5: 计算质量指标（使用辅助函数，处理NaN）
+    quality_metrics = _calculate_quality_metrics(
+        filtered,
+        available_cols,
+        filter_ratio,
+        len(candidate_df),
+    )
 
     LOGGER.info(
         "Popular list quality metrics: avg_price=%.2f, avg_interaction=%.1f, avg_inactive_days=%.0f",
@@ -451,47 +607,18 @@ def build_popular_items(
         quality_metrics.get('avg_days_inactive', 0),
     )
 
-    # Step 6: 检查是否需要Sentry告警
-    if filter_ratio > quality_alert_threshold:
-        # 高过滤比例告警
-        track_data_quality_issue(
-            check_name="popular_items_quality_filter",
-            severity="warning",
-            details={
-                "message": f"Popular榜单过滤比例过高: {filter_ratio*100:.1f}%",
-                "passed_count": filtered_count,
-                "total_candidates": len(candidate_df),
-                "target_count": top_k,
-                "filter_breakdown": filter_stats,
-                "quality_metrics": quality_metrics,
-                "thresholds": {
-                    "min_price": min_price,
-                    "min_interaction": min_interaction,
-                    "max_inactive_days": max_inactive_days,
-                }
-            },
-            metric_value=filter_ratio,
-            threshold=quality_alert_threshold,
-        )
-        LOGGER.warning(
-            "Popular quality alert: %.1f%% filtered (threshold: %.1f%%)",
-            filter_ratio * 100,
-            quality_alert_threshold * 100
-        )
-
-    # 低平均质量告警(可选)
-    avg_price = quality_metrics.get('avg_price', 0)
-    if avg_price > 0 and avg_price < 1.0:
-        track_data_quality_issue(
-            check_name="popular_items_low_avg_price",
-            severity="info",
-            details={
-                "message": f"Popular榜单平均价格偏低: {avg_price:.2f}元",
-                "quality_metrics": quality_metrics,
-            },
-            metric_value=avg_price,
-            threshold=1.0,
-        )
+    # Step 6: 统一发送质量告警（使用辅助函数）
+    _send_quality_alerts(
+        filter_ratio,
+        quality_metrics,
+        filter_stats,
+        filtered_count,
+        top_k,
+        quality_alert_threshold,
+        min_price,
+        min_interaction,
+        max_inactive_days,
+    )
 
     # Step 7: 处理过滤后数量不足的情况
     if filtered_count < top_k:
@@ -500,23 +627,6 @@ def build_popular_items(
             filtered_count,
             top_k
         )
-
-        # 如果过滤太严格，发送告警
-        if filtered_count < top_k * 0.5:  # 少于目标的50%
-            track_data_quality_issue(
-                check_name="popular_items_insufficient_quality",
-                severity="warning",
-                details={
-                    "message": f"过滤后Popular item数量不足: {filtered_count}/{top_k}",
-                    "passed_count": filtered_count,
-                    "target_count": top_k,
-                    "filter_breakdown": filter_stats,
-                    "suggestion": "考虑放宽过滤阈值或检查数据质量",
-                },
-                metric_value=filtered_count / top_k if top_k > 0 else 0,
-                threshold=0.5,
-            )
-
         # 返回所有过滤后的item
         return filtered.head(top_k).index.astype(int).tolist()
 
@@ -1601,11 +1711,20 @@ def main() -> None:
     vector_recall = build_vector_recall(content_model, content_ids, VECTOR_RECALL_K)
 
     LOGGER.info("Building popular items list...")
-    # 从环境变量读取过滤阈值配置
-    popular_min_price = float(os.getenv("POPULAR_MIN_PRICE", "0.5"))
-    popular_min_interaction = int(os.getenv("POPULAR_MIN_INTERACTION", "10"))
-    popular_max_inactive_days = int(os.getenv("POPULAR_MAX_INACTIVE_DAYS", "730"))
-    popular_enable_filter = os.getenv("POPULAR_ENABLE_FILTER", "true").lower() == "true"
+    # 从环境变量读取过滤阈值配置（带异常处理）
+    try:
+        popular_min_price = float(os.getenv("POPULAR_MIN_PRICE", "0.5"))
+        popular_min_interaction = int(os.getenv("POPULAR_MIN_INTERACTION", "10"))
+        popular_max_inactive_days = int(os.getenv("POPULAR_MAX_INACTIVE_DAYS", "730"))
+        popular_pool_multiplier = int(os.getenv("POPULAR_POOL_MULTIPLIER", "3"))
+        popular_enable_filter = os.getenv("POPULAR_ENABLE_FILTER", "true").lower() == "true"
+    except ValueError as e:
+        LOGGER.error("Invalid popular filter config from env vars: %s, using defaults", e)
+        popular_min_price = 0.5
+        popular_min_interaction = 10
+        popular_max_inactive_days = 730
+        popular_pool_multiplier = 3
+        popular_enable_filter = True
 
     popular_items = build_popular_items(
         interactions,
@@ -1614,6 +1733,7 @@ def main() -> None:
         min_interaction=popular_min_interaction,
         max_inactive_days=popular_max_inactive_days,
         enable_quality_filter=popular_enable_filter,
+        pool_multiplier=popular_pool_multiplier,
     )
 
     # MEMORY OPTIMIZATION: Optimize ranking samples immediately after loading
