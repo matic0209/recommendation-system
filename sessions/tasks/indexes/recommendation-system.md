@@ -13,7 +13,7 @@ description: 推荐算法改进、召回策略优化、排序模型调优、多�
 - `h-fix-negative-scores-and-mmr-display/` - 修复推荐结果负分和MMR展示混乱问题：过滤负分、修复score展示、优化Popular召回
 
 ### Medium Priority
-- `m-implement-popular-quality-filter.md` - 为Popular召回榜单实现质量过滤机制：训练时过滤低质量item、Sentry监控告警、环境变量可配置
+<!-- 中优先级任务将在此添加 -->
 
 ### Low Priority
 <!-- 低优先级任务将在此添加 -->
@@ -22,4 +22,4 @@ description: 推荐算法改进、召回策略优化、排序模型调优、多�
 <!-- 调研类任务将在此添加 -->
 
 ## Completed Tasks
-<!-- 已完成任务将在此移动，保持格式 -->
+- `m-implement-popular-quality-filter.md` - 为Popular召回榜单实现质量过滤机制：训练时过滤低质量item、Sentry监控告警、环境变量可配置 (2025-12-28)

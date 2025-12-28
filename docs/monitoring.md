@@ -77,6 +77,33 @@ INFO - Negative score filter: removing 16/30 items (53.3%) with negative scores 
 
 ### 5.2 Popular召回质量监控
 
+**训练阶段监控**（`pipeline/train_models.py`，2025-12-28新增）:
+
+训练日志中记录Popular榜单构建的质量过滤统计：
+
+```
+INFO - Quality filter applied: 38/150 items passed (74.7% filtered out)
+INFO -   Filtered breakdown: low_price=45, low_interaction=32, inactive=18, missing_price=0, missing_interaction_count=0, missing_days_since_last_purchase=0
+INFO - Popular list quality metrics: avg_price=3.45, avg_interaction=125.3, avg_inactive_days=89.2
+```
+
+**关键字段**：
+- 过滤比例: `74.7% filtered out`
+- 过滤明细: `low_price=X, low_interaction=Y, inactive=Z`
+- 质量指标: `avg_price`, `avg_interaction`, `avg_inactive_days`
+
+**Sentry告警**（自动触发）:
+- 过滤比例 > 70%（warning）: Popular候选池质量太差
+- 过滤后平均价格 < 1.0元（warning）: 过滤阈值可能太宽松
+- 过滤后数量 < 5（critical）或 < 25（warning）: 过滤太严格或数据质量问题
+
+**环境变量调优**（参考 `docs/ENVIRONMENT_CONFIG.md`）:
+- 提高质量要求: `POPULAR_MIN_PRICE=1.0`, `POPULAR_MIN_INTERACTION=20`
+- 放宽过滤条件: `POPULAR_MIN_PRICE=0.3`, `POPULAR_MIN_INTERACTION=5`
+- 禁用过滤: `POPULAR_ENABLE_FILTER=false`
+
+**运行时监控**（`app/main.py`，v1.1.1已有）:
+
 应用日志中记录Popular召回过滤统计：
 
 ```
@@ -93,11 +120,12 @@ INFO - Popular recall quality filter: filtered 12 low-quality items, kept 38 ite
 
 ### 5.3 推荐质量日志查询
 
+**运行时日志**（API服务）:
 ```bash
 # 查看负分过滤统计
 docker logs recommendation-api 2>&1 | grep "Negative score filter"
 
-# 查看Popular质量过滤统计
+# 查看Popular质量过滤统计（运行时）
 docker logs recommendation-api 2>&1 | grep "Popular recall quality filter"
 
 # 查看全部负分fallback触发
@@ -108,12 +136,33 @@ docker logs recommendation-api 2>&1 | grep "All.*items have negative scores"
 cat app.log | jq 'select(.message | contains("Negative score filter")) | .message'
 ```
 
+**训练日志**（2025-12-28新增）:
+```bash
+# 查看Popular榜单质量过滤统计（训练阶段）
+docker logs airflow-scheduler 2>&1 | grep "Quality filter applied"
+
+# 查看过滤明细
+docker logs airflow-scheduler 2>&1 | grep "Filtered breakdown"
+
+# 查看质量指标
+docker logs airflow-scheduler 2>&1 | grep "Popular list quality metrics"
+
+# 查看Sentry告警触发
+docker logs airflow-scheduler 2>&1 | grep "Popular quality alerts triggered"
+
+# 完整训练流程日志
+docker logs airflow-scheduler 2>&1 | grep -A 10 "Building popular items list"
+```
+
 ## 6. 运维流程
 
 1. 修改 Prometheus 规则或 Alertmanager 路由后，需 `docker compose up -d --build prometheus alertmanager` 使配置生效。
 2. Notification Gateway 支持热重启，如需更新 Sentry 逻辑或目标企业微信用户，重新部署容器即可。
 3. 在 Sentry 中创建专门的 Dashboard 或 Issue 过滤器，关注标记为 `[Prometheus]` 的消息。
-4. **推荐质量巡检**（2025-12-27新增）：
+4. **推荐质量巡检**（2025-12-27/28更新）：
    - 每日检查负分过滤比例，如持续>30%需review ranking模型
-   - 每周检查Popular召回过滤率，如持续>50%需优化热门榜单构建逻辑
+   - 每周检查Popular召回过滤率：
+     - 训练阶段过滤率 > 70%触发Sentry告警，检查候选池质量
+     - 运行时过滤率 > 50%需优化热门榜单构建逻辑
    - 关注fallback触发频率，全部负分情况应极少发生（<1%请求）
+   - 监控Sentry中的`popular_items_quality_issues`告警，及时调整环境变量阈值

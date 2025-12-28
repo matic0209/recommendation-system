@@ -72,14 +72,19 @@
 - 归一化: Min-Max scaling
 - 默认权重: 0.8
 
-#### 4. Popular召回 (带质量过滤)
+#### 4. Popular召回 (双层质量过滤)
 - 全局热门榜单 (models/top_items.json)
 - 原始分数: 线性衰减 (第1名=1.0, 最后=0.1)
 - 默认权重: 0.1
-- **质量过滤规则** (2025-12-27新增):
+- **训练阶段质量过滤** (2025-12-28新增):
+  - 过滤规则: price >= 0.5 AND interaction_count >= 10 AND days_since_last_purchase <= 730
+  - 环境变量: POPULAR_MIN_PRICE, POPULAR_MIN_INTERACTION, POPULAR_MAX_INACTIVE_DAYS
+  - Sentry告警: 过滤比例>70%, 平均价格<1.0, 数量不足时触发
+  - 实现位置: /home/ubuntu/recommend/pipeline/train_models.py Line 499-638
+- **运行时质量过滤** (2025-12-27已有):
   - 低价且无人气: price < 1.90 AND interaction_count < 66
   - 长期不活跃且交互少: days_inactive > 180 AND interaction_count < 30
-- 实现位置: /home/ubuntu/recommend/app/main.py Line 1688-1750
+  - 实现位置: /home/ubuntu/recommend/app/main.py Line 1688-1750
 
 ### 排序与质量控制 (Ranking & Quality Control)
 
@@ -129,9 +134,12 @@
 - **监控**: 查看日志中的"Negative score filter"记录
 
 #### 问题: Popular召回质量差
-- **原因**: 全局热门榜单缺乏上下文相关性
-- **解决**: 质量过滤规则已添加 (2025-12-27修复)
-- **监控**: 查看日志中的"Popular recall quality filter"记录
+- **原因**: 全局热门榜单缺乏上下文相关性或包含低质量item
+- **解决**: 双层质量过滤 (训练阶段2025-12-28 + 运行时2025-12-27)
+- **监控**:
+  - 训练日志: `docker logs airflow-scheduler 2>&1 | grep "Quality filter applied"`
+  - 运行时日志: `docker logs recommendation-api 2>&1 | grep "Popular recall quality filter"`
+- **调优**: 通过环境变量调整训练阶段过滤阈值（参考docs/ENVIRONMENT_CONFIG.md）
 
 #### 问题: Score展示顺序混乱
 - **原因**: MMR重排后展示原始分数（非MMR分数）
