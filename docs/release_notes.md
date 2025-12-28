@@ -1,5 +1,30 @@
 # Release Notes
 
+## v1.1.2 (2025-12-28)
+
+**Popular召回质量优化 - 训练阶段过滤**：
+
+- **训练阶段质量过滤**：在模型训练时对Popular榜单应用质量控制，从源头提升榜单质量
+  - 过滤规则: `price >= 0.5 AND interaction_count >= 10 AND days_since_last_purchase <= 730`
+  - 环境变量可配置: 5个新环境变量 (`POPULAR_MIN_PRICE`, `POPULAR_MIN_INTERACTION`, `POPULAR_MAX_INACTIVE_DAYS`, `POPULAR_POOL_MULTIPLIER`, `POPULAR_ENABLE_FILTER`)
+  - Sentry自动告警: 过滤比例>70%、平均价格<1.0、数量不足时触发告警
+  - 实现位置: `pipeline/train_models.py` Line 319-638
+
+- **代码质量提升**：提取3个辅助函数提升可测试性和可维护性
+  - `_apply_quality_filters()`: 应用质量过滤规则和统计
+  - `_calculate_quality_metrics()`: 计算质量指标（处理NaN风险）
+  - `_send_quality_alerts()`: 统一发送Sentry告警减少噪音
+
+- **向后兼容设计**：
+  - 特征缺失时自动降级到原逻辑
+  - 可通过 `POPULAR_ENABLE_FILTER=false` 快速禁用过滤
+  - 环境变量类型转换异常时使用默认值继续训练
+
+**文档更新**：
+- 新增环境变量配置说明: `docs/ENVIRONMENT_CONFIG.md`
+- 更新监控日志说明: `docs/monitoring.md`
+- 更新召回策略文档: `docs/README.md`
+
 ## v1.1.1 (2025-12-27)
 
 **推荐质量优化**：

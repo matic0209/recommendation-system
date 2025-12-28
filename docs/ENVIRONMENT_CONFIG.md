@@ -133,6 +133,44 @@ HF_ENDPOINT=https://hf-mirror.com ENV_FILE=.env.prod python3 -m pipeline.train_m
 
 ## 关键配置项对比
 
+### Popular召回质量过滤配置 (2025-12-28)
+
+```bash
+# .env (开发/生产通用配置)
+# 训练阶段Popular榜单质量控制，确保榜单仅包含高质量item
+POPULAR_MIN_PRICE=0.5                    # 最低价格阈值(元)
+POPULAR_MIN_INTERACTION=10               # 最低互动量阈值(次)
+POPULAR_MAX_INACTIVE_DAYS=730            # 最大不活跃天数(天)，730=2年
+POPULAR_POOL_MULTIPLIER=3                # 候选池扩大倍数
+POPULAR_ENABLE_FILTER=true               # 是否启用质量过滤
+```
+
+**配置说明**:
+- 这些参数在 `pipeline/train_models.py` 的 `build_popular_items()` 函数中使用
+- 过滤规则为**组合条件**: `price >= 0.5 AND interaction_count >= 10 AND days_since_last_purchase <= 730`
+- 候选池默认扩大3倍(150个)以确保过滤后仍有足够item
+- 可通过设置 `POPULAR_ENABLE_FILTER=false` 快速禁用过滤回退到原逻辑
+
+**调优建议**:
+- 如果Popular榜单质量差（低价/低互动item多），提高阈值：
+  ```bash
+  POPULAR_MIN_PRICE=1.0
+  POPULAR_MIN_INTERACTION=20
+  POPULAR_MAX_INACTIVE_DAYS=365
+  ```
+- 如果过滤后数量不足（<10个），放宽阈值：
+  ```bash
+  POPULAR_MIN_PRICE=0.3
+  POPULAR_MIN_INTERACTION=5
+  POPULAR_MAX_INACTIVE_DAYS=1095
+  ```
+
+**监控告警**:
+- Sentry会在以下情况自动告警（参考 `pipeline/train_models.py` Line 422-497）：
+  - 过滤比例 > 70%（warning级别）
+  - 过滤后平均价格 < 1.0元（warning级别）
+  - 过滤后数量 < 5个（critical级别）或 < 25个（warning级别）
+
 ### HuggingFace 镜像配置
 
 ```bash

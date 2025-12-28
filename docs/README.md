@@ -90,11 +90,20 @@ uvicorn app.main:app --reload --port 8000
 | Behavior | 用户协同过滤 + item-item相似度 | 1.2 | - |
 | Content | 基于标签/描述的TF-IDF相似度 | 1.0 | - |
 | Vector | SBERT语义向量相似度 | 0.8 | - |
-| Popular | 全局热门榜单 | 0.1 | **质量过滤**（2025-12-27新增） |
+| Popular | 全局热门榜单 | 0.1 | **双层质量过滤**（2025-12-28强化） |
 
 **Popular召回质量过滤规则**：
+
+*训练阶段过滤*（`pipeline/train_models.py`）：
+- 过滤条件: `price >= 0.5 AND interaction_count >= 10 AND days_since_last_purchase <= 730`
+- 可通过环境变量调整: `POPULAR_MIN_PRICE`, `POPULAR_MIN_INTERACTION`, `POPULAR_MAX_INACTIVE_DAYS`
+- Sentry自动告警: 过滤比例>70%、平均价格<1.0、数量不足时触发
+
+*运行时过滤*（`app/main.py`）：
 - 过滤低价且无人气: `price < 1.90 AND interaction_count < 66`
 - 过滤长期不活跃且交互少: `days_inactive > 180 AND interaction_count < 30`
+
+详细配置参考: `docs/ENVIRONMENT_CONFIG.md`
 
 ### 8.2 排序与负分处理
 

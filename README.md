@@ -5,8 +5,9 @@
 ## 功能概览
 
 - **离线流水线**（`pipeline/`）：抽取业务库与 Matomo 行为数据、构建增强特征、训练排序模型并生成评估报告。
+  - Popular榜单质量过滤: 训练阶段应用质量控制（2025-12-28新增）
 - **在线服务**（`app/main.py`）：FastAPI + 多路召回 + LightGBM 排序，支持实验灰度、缓存降级与 Prometheus 指标。
-  - 多渠道召回: Behavior / Content / Vector / Popular（带质量过滤）
+  - 多渠道召回: Behavior / Content / Vector / Popular（双层质量过滤）
   - 负分硬截断: 自动过滤低质量推荐（2025-12-27新增）
 - **监控链路**（`monitoring/`, `notification_gateway/`）：Prometheus/Alertmanager + 企业微信 + Sentry 自动联动。
 - **每日漏斗报表**（`pipeline/daily_report.py`, `report_viewer/`）：生成曝光→点击→明细→转化漏斗并提供 Web 看板。
