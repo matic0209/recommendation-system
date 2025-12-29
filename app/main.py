@@ -2324,15 +2324,17 @@ def _apply_ranking(
     channel_weights: Dict[str, float],
     user_features: Optional[Dict[str, float]],
 ) -> Dict[int, float]:
-    """Apply LightGBM ranker to score candidates and filter negative scores.
+    """Apply LightGBM ranker to score candidates and filter low-quality items.
 
     LightGBM ranker outputs raw prediction scores in range (-∞, +∞). Negative scores
     indicate items predicted to be below average quality.
 
-    Negative score handling (updated 2025-12-29):
-    - Soft threshold: Remove items with score < -0.3
-    - Fallback: If all scores are low, keep top 50% (minimum 5 items)
-    - Logging: Record low score ratio and filtering count
+    Score filtering strategy (updated 2025-12-29):
+    - Percentile-based: Remove bottom 30% of candidates by score
+    - Adaptive: Works regardless of score distribution (handles negative-heavy distributions)
+    - Minimum candidates: Only filter if >= 10 candidates available
+    - Safety fallback: Keep top 50% if percentile filter is too aggressive
+    - Logging: Record filtering stats with dynamic threshold value
 
     Args:
         scores: Mutable dict of candidate scores (updated in-place)
@@ -2397,33 +2399,45 @@ def _apply_ranking(
     # 保存ranking分数副本（用于响应展示）
     ranking_scores = scores.copy()
 
-    # 负分软阈值过滤：过滤掉ranking后分数过低的item（-0.3以下）
-    # 保留接近0的候选，避免过度过滤导致结果数量不足
-    NEGATIVE_SCORE_THRESHOLD = -0.3
-    total_items = len(scores)
-    low_score_items = [item_id for item_id, score in scores.items() if score < NEGATIVE_SCORE_THRESHOLD]
-    if low_score_items:
-        low_score_ratio = len(low_score_items) / total_items * 100 if total_items > 0 else 0
+    # 百分位过滤：过滤掉ranking分数最低的30%候选
+    # 使用百分位数而非固定阈值，确保无论分数分布如何都能保留足够的候选
+    FILTER_PERCENTILE = 30  # 过滤最差的30%，保留最好的70%
+    MIN_CANDIDATES_FOR_FILTER = 10  # 至少10个候选才启用过滤
 
-        # 如果全部都是低分，保留分数最高的50%作为fallback
-        if len(low_score_items) == total_items and total_items > 0:
-            LOGGER.warning(
-                f"All {total_items} items have scores below {NEGATIVE_SCORE_THRESHOLD}! "
-                f"Keeping top 50% by score as fallback"
-            )
-            sorted_items = sorted(scores.items(), key=lambda x: x[1], reverse=True)
-            keep_count = max(5, total_items // 2)  # 至少保留5个
-            keep_ids = {item_id for item_id, _ in sorted_items[:keep_count]}
-            low_score_items = [item_id for item_id in low_score_items if item_id not in keep_ids]
+    total_items = len(scores)
+    low_score_items = []
+
+    if total_items >= MIN_CANDIDATES_FOR_FILTER:
+        score_values = list(scores.values())
+        # 计算30%分位点作为过滤阈值
+        threshold = np.percentile(score_values, FILTER_PERCENTILE)
+        low_score_items = [item_id for item_id, score in scores.items() if score < threshold]
 
         if low_score_items:
-            LOGGER.info(
-                f"Low score filter (threshold={NEGATIVE_SCORE_THRESHOLD}): removing {len(low_score_items)}/{total_items} items "
-                f"({low_score_ratio:.1f}%) with low scores (sample: {low_score_items[:5]})"
-            )
-            for item_id in low_score_items:
-                scores.pop(item_id, None)
-                reasons.pop(item_id, None)
+            low_score_ratio = len(low_score_items) / total_items * 100 if total_items > 0 else 0
+
+            # 安全保护：确保至少保留50%候选
+            if len(low_score_items) > total_items * 0.5:
+                LOGGER.warning(
+                    f"Percentile filter would remove {len(low_score_items)}/{total_items} items ({low_score_ratio:.1f}%), "
+                    f"keeping top 50% as safety fallback"
+                )
+                sorted_items = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+                keep_count = max(5, total_items // 2)
+                keep_ids = {item_id for item_id, _ in sorted_items[:keep_count]}
+                low_score_items = [item_id for item_id in low_score_items if item_id not in keep_ids]
+
+            if low_score_items:
+                LOGGER.info(
+                    f"Percentile filter (p{FILTER_PERCENTILE}, threshold={threshold:.3f}): "
+                    f"removing {len(low_score_items)}/{total_items} items ({low_score_ratio:.1f}%) "
+                    f"with low scores (sample: {low_score_items[:5]})"
+                )
+                for item_id in low_score_items:
+                    scores.pop(item_id, None)
+                    reasons.pop(item_id, None)
+    else:
+        LOGGER.debug(f"Skipping score filter: only {total_items} candidates (minimum {MIN_CANDIDATES_FOR_FILTER} required)")
 
     return ranking_scores
 
