@@ -1254,12 +1254,13 @@ def _build_response_items(
     apply_exploration: bool = False,
     exploration_epsilon: float = 0.1,
     all_dataset_ids: Optional[Set[int]] = None,
+    ranking_scores: Optional[Dict[int, float]] = None,
 ) -> List[RecommendationItem]:
     """
     Build response items with optional MMR reranking and exploration.
 
     Args:
-        candidate_scores: Dataset ID to score mapping
+        candidate_scores: Dataset ID to score mapping (for MMR ranking)
         reasons: Dataset ID to reason mapping
         limit: Maximum number of items to return
         metadata: Dataset metadata
@@ -1269,6 +1270,7 @@ def _build_response_items(
         apply_exploration: Whether to apply epsilon-greedy exploration
         exploration_epsilon: Exploration rate (0.0-1.0)
         all_dataset_ids: All available dataset IDs for exploration pool
+        ranking_scores: Optional ranking model scores for display (used instead of candidate_scores)
 
     Returns:
         List of recommendation items
@@ -1302,8 +1304,11 @@ def _build_response_items(
     result: List[RecommendationItem] = []
     for dataset_id in ranked_ids:
         info = metadata.get(dataset_id, {})
-        # Use score from candidate_scores if available, otherwise use a default score
-        score = candidate_scores.get(dataset_id, 0.5)
+        # Use ranking score for display if available, otherwise use candidate score
+        if ranking_scores and dataset_id in ranking_scores:
+            score = ranking_scores[dataset_id]
+        else:
+            score = candidate_scores.get(dataset_id, 0.5)
         reason = reasons.get(dataset_id, "exploration" if dataset_id not in candidate_scores else "unknown")
 
         result.append(
@@ -2318,16 +2323,16 @@ def _apply_ranking(
     request_context: Optional[Dict[str, str]],
     channel_weights: Dict[str, float],
     user_features: Optional[Dict[str, float]],
-) -> None:
+) -> Dict[int, float]:
     """Apply LightGBM ranker to score candidates and filter negative scores.
 
     LightGBM ranker outputs raw prediction scores in range (-∞, +∞). Negative scores
     indicate items predicted to be below average quality.
 
-    Negative score handling (added 2025-12-27):
-    - Hard cutoff: Remove all items with score < 0
-    - Fallback: If all scores are negative, keep top 50% (minimum 5 items)
-    - Logging: Record negative score ratio and filtering count
+    Negative score handling (updated 2025-12-29):
+    - Soft threshold: Remove items with score < -0.3
+    - Fallback: If all scores are low, keep top 50% (minimum 5 items)
+    - Logging: Record low score ratio and filtering count
 
     Args:
         scores: Mutable dict of candidate scores (updated in-place)
@@ -2344,13 +2349,16 @@ def _apply_ranking(
         channel_weights: Channel weight configuration
         user_features: Optional user-level features
 
+    Returns:
+        Dict of ranking scores (before filtering) for display purposes
+
     Side Effects:
-        - Modifies scores dict in-place (adds ranker predictions)
-        - Removes negative score items from scores and reasons dicts
-        - Logs negative score filtering statistics
+        - Modifies scores dict in-place (adds ranker predictions, removes low scores)
+        - Removes low score items from scores and reasons dicts
+        - Logs low score filtering statistics
     """
     if rank_model is None or not scores:
-        return
+        return {}
 
     try:
         current_state = _get_app_state()
@@ -2378,7 +2386,7 @@ def _apply_ranking(
         slot_metrics_indexed=getattr(current_state, "slot_metrics_indexed", None),
     )
     if features.empty:
-        return
+        return {}
 
     try:
         _apply_ranking_with_circuit_breaker(scores, reasons, rank_model, features)
@@ -2386,31 +2394,38 @@ def _apply_ranking(
         LOGGER.warning("Ranking model failed (circuit breaker or error): %s", exc)
         # Continue without ranking - scores already populated from recall
 
-    # 负分硬截断：过滤掉ranking后分数为负的item
-    total_items = len(scores)
-    negative_items = [item_id for item_id, score in scores.items() if score < 0]
-    if negative_items:
-        negative_ratio = len(negative_items) / total_items * 100 if total_items > 0 else 0
+    # 保存ranking分数副本（用于响应展示）
+    ranking_scores = scores.copy()
 
-        # 如果全部是负分，保留分数最高的50%作为fallback
-        if len(negative_items) == total_items and total_items > 0:
+    # 负分软阈值过滤：过滤掉ranking后分数过低的item（-0.3以下）
+    # 保留接近0的候选，避免过度过滤导致结果数量不足
+    NEGATIVE_SCORE_THRESHOLD = -0.3
+    total_items = len(scores)
+    low_score_items = [item_id for item_id, score in scores.items() if score < NEGATIVE_SCORE_THRESHOLD]
+    if low_score_items:
+        low_score_ratio = len(low_score_items) / total_items * 100 if total_items > 0 else 0
+
+        # 如果全部都是低分，保留分数最高的50%作为fallback
+        if len(low_score_items) == total_items and total_items > 0:
             LOGGER.warning(
-                f"All {total_items} items have negative scores! "
+                f"All {total_items} items have scores below {NEGATIVE_SCORE_THRESHOLD}! "
                 f"Keeping top 50% by score as fallback"
             )
             sorted_items = sorted(scores.items(), key=lambda x: x[1], reverse=True)
             keep_count = max(5, total_items // 2)  # 至少保留5个
             keep_ids = {item_id for item_id, _ in sorted_items[:keep_count]}
-            negative_items = [item_id for item_id in negative_items if item_id not in keep_ids]
+            low_score_items = [item_id for item_id in low_score_items if item_id not in keep_ids]
 
-        if negative_items:
+        if low_score_items:
             LOGGER.info(
-                f"Negative score filter: removing {len(negative_items)}/{total_items} items "
-                f"({negative_ratio:.1f}%) with negative scores (sample: {negative_items[:5]})"
+                f"Low score filter (threshold={NEGATIVE_SCORE_THRESHOLD}): removing {len(low_score_items)}/{total_items} items "
+                f"({low_score_ratio:.1f}%) with low scores (sample: {low_score_items[:5]})"
             )
-            for item_id in negative_items:
+            for item_id in low_score_items:
                 scores.pop(item_id, None)
                 reasons.pop(item_id, None)
+
+    return ranking_scores
 
 
 def _log_exposure(
@@ -2863,7 +2878,7 @@ async def get_similar(
                 limit=limit,
             )
             user_feature_map: Dict[str, float] = {}
-            await _call_blocking(
+            ranking_scores = await _call_blocking(
                 partial(
                     _apply_ranking,
                     scores,
@@ -2890,6 +2905,7 @@ async def get_similar(
                 dataset_tags=state.dataset_tags,
                 apply_mmr=True,
                 mmr_lambda=mmr_lambda,
+                ranking_scores=ranking_scores,  # 传递ranking分数用于展示
             )
             return items, reasons, local_variant, local_bundle.run_id, effective_weights
 
@@ -3199,7 +3215,7 @@ async def recommend_for_detail(
             )
 
             stage_start = time.perf_counter()
-            await _call_blocking(
+            ranking_scores = await _call_blocking(
                 partial(
                     _apply_ranking,
                     scores,
@@ -3237,6 +3253,7 @@ async def recommend_for_detail(
                 apply_exploration=True,  # 启用探索机制
                 exploration_epsilon=0.15,  # 15%探索率
                 all_dataset_ids=set(state.metadata.keys()),  # 全量dataset池
+                ranking_scores=ranking_scores,  # 传递ranking分数用于展示
             )
             _log_stage_duration(
                 "response_build",
