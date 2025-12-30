@@ -156,6 +156,7 @@ paraphrase-*.tar.gz
 
 # Environment configs
 .env.prod
+.env.memory
 
 # Exclude all data directories and files
 data/
