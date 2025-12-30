@@ -1,8 +1,9 @@
 ---
 name: h-fix-recommendation-diversity
 branch: fix/h-fix-recommendation-diversity
-status: pending
+status: completed
 created: 2025-12-25
+completed: 2025-12-30
 ---
 
 # 修复推荐系统多样性与分数断崖问题
