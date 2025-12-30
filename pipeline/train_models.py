@@ -94,6 +94,42 @@ RANK_MODEL_PATH = MODELS_DIR / "rank_model.pkl"
 RANKING_SAMPLES_PATH = PROCESSED_DIR / "ranking_training_samples.parquet"
 USER_FEATURES_PATH = PROCESSED_DIR / "user_features_v2.parquet"
 
+# Standardized top-level categories for category relevance features
+TOP_CATEGORIES_SET = frozenset([
+    "金融", "医疗健康", "政府政务", "交通运输",
+    "教育培训", "能源环保", "农业", "科技",
+    "商业零售", "文化娱乐", "社会民生",
+])
+
+
+def _parse_tags(tag_str: str) -> set:
+    """Parse semicolon-separated tag string into a set of lowercase tags."""
+    if not tag_str or pd.isna(tag_str):
+        return set()
+    return set(t.strip().lower() for t in str(tag_str).split(";") if t.strip())
+
+
+def _compute_tag_overlap(target_tags: set, candidate_tags: set) -> float:
+    """Count number of overlapping tags between target and candidate."""
+    return float(len(target_tags & candidate_tags))
+
+
+def _compute_tag_jaccard(target_tags: set, candidate_tags: set) -> float:
+    """Compute Jaccard similarity between target and candidate tags."""
+    if not target_tags or not candidate_tags:
+        return 0.0
+    union = len(target_tags | candidate_tags)
+    if union == 0:
+        return 0.0
+    return float(len(target_tags & candidate_tags)) / union
+
+
+def _compute_same_top_category(target_tags: set, candidate_tags: set) -> float:
+    """Check if target and candidate share any top-level category."""
+    target_cats = target_tags & TOP_CATEGORIES_SET
+    candidate_cats = candidate_tags & TOP_CATEGORIES_SET
+    return 1.0 if len(target_cats & candidate_cats) > 0 else 0.0
+
 
 def _load_frame(path: Path) -> pd.DataFrame:
     if not path.exists():
@@ -1191,6 +1227,62 @@ def _prepare_request_ranking_data(
         del user_numeric
         gc.collect()
 
+    # === CATEGORY RELEVANCE FEATURES ===
+    # Compute tag-based features using page_id (target) and dataset_id (candidate)
+    LOGGER.info("Computing category relevance features...")
+
+    # Build tag lookup from dataset_profile (need tag column separately)
+    tag_lookup = {}
+    if "tag" in dataset_profile.columns:
+        for _, row in dataset_profile[["dataset_id", "tag"]].iterrows():
+            dataset_id = row["dataset_id"]
+            tag_lookup[dataset_id] = _parse_tags(row.get("tag", ""))
+
+    # Compute features for each sample
+    if tag_lookup and "page_id" in enriched.columns:
+        # Pre-compute target tags for each unique page_id
+        unique_page_ids = enriched["page_id"].unique()
+        page_id_tags = {pid: tag_lookup.get(int(pid), set()) for pid in unique_page_ids if pd.notna(pid)}
+
+        def compute_category_features(row):
+            page_id = row.get("page_id")
+            dataset_id = row.get("dataset_id")
+
+            if pd.isna(page_id) or pd.isna(dataset_id):
+                return 0.0, 0.0, 0.0
+
+            target_tags = page_id_tags.get(int(page_id), set())
+            candidate_tags = tag_lookup.get(int(dataset_id), set())
+
+            overlap = _compute_tag_overlap(target_tags, candidate_tags)
+            jaccard = _compute_tag_jaccard(target_tags, candidate_tags)
+            same_cat = _compute_same_top_category(target_tags, candidate_tags)
+
+            return overlap, jaccard, same_cat
+
+        # Vectorized computation for better performance
+        category_results = enriched.apply(compute_category_features, axis=1, result_type="expand")
+        enriched["tag_overlap_count"] = category_results[0].astype(float)
+        enriched["tag_jaccard_similarity"] = category_results[1].astype(float)
+        enriched["same_top_category"] = category_results[2].astype(float)
+
+        LOGGER.info(
+            "Category features computed - overlap mean: %.3f, jaccard mean: %.3f, same_cat mean: %.3f",
+            enriched["tag_overlap_count"].mean(),
+            enriched["tag_jaccard_similarity"].mean(),
+            enriched["same_top_category"].mean(),
+        )
+    else:
+        # Fallback: fill with zeros if tag data not available
+        LOGGER.warning("Tag lookup empty or page_id missing, filling category features with zeros")
+        enriched["tag_overlap_count"] = 0.0
+        enriched["tag_jaccard_similarity"] = 0.0
+        enriched["same_top_category"] = 0.0
+
+    # Free tag lookup memory
+    del tag_lookup
+    gc.collect()
+
     # MEMORY OPTIMIZATION: Optimize memory before expensive operations
     LOGGER.info("Optimizing enriched DataFrame memory usage...")
     enriched = optimize_dataframe_memory(enriched)
@@ -1202,6 +1294,10 @@ def _prepare_request_ranking_data(
         "score",
         "position",
         "channel_weight",
+        # Category relevance features
+        "tag_overlap_count",
+        "tag_jaccard_similarity",
+        "same_top_category",
     ]
     categorical_features = [
         "channel",

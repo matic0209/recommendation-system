@@ -1955,8 +1955,13 @@ def _build_static_ranking_features(
     slot_metrics_aggregated: pd.DataFrame,
     feature_overrides: Optional[pd.DataFrame] = None,
     stats_overrides: Optional[pd.DataFrame] = None,
+    target_dataset_id: Optional[int] = None,
 ) -> pd.DataFrame:
-    """Compute dataset-level static ranking features."""
+    """Compute dataset-level static ranking features.
+
+    Args:
+        target_dataset_id: The target/page dataset ID for computing category relevance features.
+    """
     if not dataset_ids:
         return pd.DataFrame()
 
@@ -2061,6 +2066,53 @@ def _build_static_ranking_features(
     for col in pca_columns:
         features[col] = pd.to_numeric(selected[col], errors="coerce").fillna(0.0)
 
+    # === Category Relevance Features ===
+    # Compute tag-based similarity features between target and candidates
+    TOP_CATEGORIES = frozenset([
+        "金融", "医疗健康", "政府政务", "交通运输",
+        "教育培训", "能源环保", "农业", "科技",
+        "商业零售", "文化娱乐", "社会民生",
+    ])
+
+    if target_dataset_id is not None and target_dataset_id in raw_indexed.index:
+        target_row = raw_indexed.loc[target_dataset_id]
+        target_tags_str = target_row.get("tag", "")
+        target_tags = set(
+            t.strip().lower() for t in str(target_tags_str).split(";") if t.strip()
+        ) if target_tags_str else set()
+
+        def calc_tag_overlap(candidate_tags_str) -> float:
+            candidate_tags = set(
+                t.strip().lower() for t in str(candidate_tags_str).split(";") if t.strip()
+            ) if candidate_tags_str else set()
+            return float(len(target_tags & candidate_tags))
+
+        def calc_tag_jaccard(candidate_tags_str) -> float:
+            candidate_tags = set(
+                t.strip().lower() for t in str(candidate_tags_str).split(";") if t.strip()
+            ) if candidate_tags_str else set()
+            if not target_tags or not candidate_tags:
+                return 0.0
+            union = len(target_tags | candidate_tags)
+            return float(len(target_tags & candidate_tags)) / union if union > 0 else 0.0
+
+        def calc_same_top_category(candidate_tags_str) -> float:
+            candidate_tags = set(
+                t.strip().lower() for t in str(candidate_tags_str).split(";") if t.strip()
+            ) if candidate_tags_str else set()
+            target_cats = target_tags & TOP_CATEGORIES
+            candidate_cats = candidate_tags & TOP_CATEGORIES
+            return 1.0 if len(target_cats & candidate_cats) > 0 else 0.0
+
+        features["tag_overlap_count"] = selected["tag"].apply(calc_tag_overlap)
+        features["tag_jaccard_similarity"] = selected["tag"].apply(calc_tag_jaccard)
+        features["same_top_category"] = selected["tag"].apply(calc_same_top_category)
+    else:
+        # No target context - fill with defaults
+        features["tag_overlap_count"] = 0.0
+        features["tag_jaccard_similarity"] = 0.0
+        features["same_top_category"] = 0.0
+
     return features
 
 
@@ -2083,9 +2135,17 @@ def _compute_ranking_features(
     raw_features_indexed: Optional[pd.DataFrame] = None,
     dataset_stats_indexed: Optional[pd.DataFrame] = None,
     slot_metrics_indexed: Optional[pd.DataFrame] = None,
+    target_dataset_id: Optional[int] = None,
 ) -> pd.DataFrame:
     if not dataset_ids:
         return pd.DataFrame()
+
+    # Extract target_dataset_id from request_context if not provided
+    if target_dataset_id is None and request_context:
+        try:
+            target_dataset_id = int(request_context.get("target_dataset_id", 0)) or None
+        except (TypeError, ValueError):
+            target_dataset_id = None
 
     indexed_raw = raw_features_indexed if raw_features_indexed is not None else raw_features
     indexed_stats = dataset_stats_indexed if dataset_stats_indexed is not None else dataset_stats
@@ -2101,6 +2161,7 @@ def _compute_ranking_features(
                 indexed_raw,
                 indexed_stats,
                 indexed_slot,
+                target_dataset_id=target_dataset_id,
             )
             features.loc[missing_ids] = filled
     else:
@@ -2109,6 +2170,7 @@ def _compute_ranking_features(
             indexed_raw,
             indexed_stats,
             indexed_slot,
+            target_dataset_id=target_dataset_id,
         )
 
     override_feature_df = None
@@ -2138,6 +2200,7 @@ def _compute_ranking_features(
             indexed_slot,
             feature_overrides=override_feature_df,
             stats_overrides=override_stats_df,
+            target_dataset_id=target_dataset_id,
         )
         if features.empty:
             features = refreshed
@@ -2323,6 +2386,7 @@ def _apply_ranking(
     request_context: Optional[Dict[str, str]],
     channel_weights: Dict[str, float],
     user_features: Optional[Dict[str, float]],
+    target_dataset_id: Optional[int] = None,
 ) -> Dict[int, float]:
     """Apply LightGBM ranker to score candidates and filter low-quality items.
 
@@ -2350,6 +2414,7 @@ def _apply_ranking(
         request_context: Optional request context dict
         channel_weights: Channel weight configuration
         user_features: Optional user-level features
+        target_dataset_id: Target dataset ID for category relevance features
 
     Returns:
         Dict of ranking scores (before filtering) for display purposes
@@ -2386,6 +2451,7 @@ def _apply_ranking(
         raw_features_indexed=getattr(current_state, "raw_features_indexed", None),
         dataset_stats_indexed=getattr(current_state, "dataset_stats_indexed", None),
         slot_metrics_indexed=getattr(current_state, "slot_metrics_indexed", None),
+        target_dataset_id=target_dataset_id,
     )
     if features.empty:
         return {}
@@ -2908,6 +2974,7 @@ async def get_similar(
                     request_context=request_context,
                     channel_weights=effective_weights,
                     user_features=user_feature_map,
+                    target_dataset_id=dataset_id,
                 ),
                 endpoint=endpoint,
                 operation="model_inference",
@@ -3245,6 +3312,7 @@ async def recommend_for_detail(
                     request_context=request_context,
                     channel_weights=effective_weights,
                     user_features=user_feature_map,
+                    target_dataset_id=dataset_id,
                 ),
                 endpoint=endpoint,
                 operation="model_inference",

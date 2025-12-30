@@ -31,6 +31,9 @@ created: 2025-12-30
 
 ## Context Manifest
 
+**Last Updated**: 2025-12-30 by Context-Gathering Agent
+**Verification Status**: Code paths verified against actual source files
+
 ### How Tags Currently Work in the Recommendation System
 
 #### Tags在系统中的完整生命周期
@@ -39,11 +42,12 @@ created: 2025-12-30
 
 Tags来自用户手动输入,存储在数据库dataset表的`tag`字段中。当数据流经ETL pipeline时:
 
-- **原始数据位置**: `/home/ubuntu/recommend/data/cleaned/dataset_features.parquet`
+- **原始数据位置**: `/root/recommendation-system/data/cleaned/dataset_features.parquet`
   - 字段结构: `dataset_id`, `dataset_name`, `description`, `tag`, `price`, `create_company_name`, `cover_id`, `create_time`
+  - **实际数据规模**: 13,312 items (已验证)
   - Tag格式: 分号分隔的字符串 (例如: `"数字经济;数据要素;数据市场发展"`)
 
-- **处理后数据**: `/home/ubuntu/recommend/data/processed/dataset_features_v2.parquet`
+- **处理后数据**: `/root/recommendation-system/data/processed/dataset_features_v2.parquet`
   - 通过`pipeline/build_features_v2.py`的`FeatureEngineV2`类处理
   - 增加了75+特征,包括`tag_count`, `has_tags`等tag相关派生特征
 
@@ -695,5 +699,304 @@ CATEGORIES = [
 ### Description质量
 用户确认description质量较高，适合用于NLP提取
 
+### Verified Implementation Details (Added by Context-Gathering Agent)
+
+#### 1. 实际文件路径 (Verified Paths)
+
+项目根目录为 `/root/recommendation-system`，以下是关键文件路径：
+
+**数据文件**:
+- 原始数据: `/root/recommendation-system/data/cleaned/dataset_features.parquet` (13,312 items)
+- 处理后特征: `/root/recommendation-system/data/processed/dataset_features_v2.parquet`
+- 训练样本: `/root/recommendation-system/data/processed/ranking_training_samples.parquet`
+
+**模型文件**:
+- Tag索引: `/root/recommendation-system/models/tag_to_items.json`, `/root/recommendation-system/models/item_to_tags.json`
+- 排序模型: `/root/recommendation-system/models/rank_model.pkl`
+
+**代码文件** (需要修改的文件):
+- 特征工程: `/root/recommendation-system/pipeline/build_features_v2.py`
+- 模型训练: `/root/recommendation-system/pipeline/train_models.py`
+- 召回引擎: `/root/recommendation-system/pipeline/recall_engine_v2.py`
+- 推荐服务: `/root/recommendation-system/app/main.py`
+- 配置文件: `/root/recommendation-system/config/settings.py`
+
+#### 2. 关键代码行号 (Verified Line Numbers)
+
+**pipeline/build_features_v2.py**:
+- `FeatureEngineV2`类定义: Line 24-510
+- `build_user_features_v2()`: Line 38-136 (用户tag偏好计算)
+- `_compute_user_tag_preferences()`: Line 167-203 (提取top3偏好标签)
+- `build_dataset_features_v2()`: Line 219-377 (tag_count特征: Line 291-298)
+- `build_cross_features()`: Line 379-447 (交叉特征，当前未启用)
+
+**pipeline/train_models.py**:
+- HuggingFace镜像配置: Line 31-38
+- `_prepare_ranking_dataset()`: Line 928-1114 (特征准备)
+  - tag_count计算: Line 946
+  - has_tags特征: Line 997
+  - content_richness: Line 998
+  - base_columns列表: Line 1000-1005
+- `_train_lightgbm_ranker()`: Line 1302-1462 (LGBMRanker训练)
+- `main()`: Line 1644-1937 (训练入口)
+
+**pipeline/recall_engine_v2.py**:
+- `train_tag_inverted_index()`: Line 102-139 (tag索引构建)
+- `tag_recall()`: Line 258-311 (tag召回实现)
+- `save_models()`: Line 665-720 (模型保存)
+
+**app/main.py**:
+- `_load_recall_artifacts()`: Line 716-743 (加载tag索引)
+- `_parse_tags()`: Line 746-749 (标准tag解析函数)
+- `_augment_with_multi_channel()`: Line 1474-1570 (tag召回: Line 1498-1520)
+- `_build_static_ranking_features()`: Line 1951-2064 (静态特征构建)
+- `_compute_ranking_features()`: Line 2067-2200 (完整特征计算)
+- `_apply_ranking()`: Line 2311-2442 (排序应用)
+
+#### 3. 依赖安装说明
+
+当前项目已安装transformers和sentence-transformers，但需要确认Erlangshen模型的兼容性：
+
+```bash
+# 检查已安装版本
+pip list | grep -E "transformers|sentence-transformers|torch"
+
+# 当前版本 (requirements.txt):
+# torch==2.1.2
+# transformers>=4.35.0,<4.36.0
+# sentence-transformers==2.3.1
+# huggingface-hub>=0.15.1
+```
+
+**HuggingFace镜像配置** (已在train_models.py中配置):
+```python
+# Line 31-38 in pipeline/train_models.py
+if os.getenv("HF_ENDPOINT"):
+    hf_endpoint = os.getenv("HF_ENDPOINT")
+    os.environ["HF_ENDPOINT"] = hf_endpoint
+    os.environ["HUGGINGFACE_HUB_ENDPOINT"] = hf_endpoint
+```
+
+需要在.env中设置: `HF_ENDPOINT=https://hf-mirror.com`
+
+#### 4. 类别特征添加的具体步骤
+
+**步骤1: 创建enhance_tags.py脚本**
+位置: `/root/recommendation-system/pipeline/enhance_tags.py`
+
+```python
+# 核心逻辑
+from transformers import pipeline
+import pandas as pd
+
+CATEGORIES = [
+    "金融", "医疗健康", "政府政务", "交通运输",
+    "教育培训", "能源环保", "农业", "科技",
+    "商业零售", "文化娱乐", "社会民生"
+]
+
+def enhance_tags():
+    # 1. 加载数据
+    df = pd.read_parquet("data/cleaned/dataset_features.parquet")
+
+    # 2. 初始化分类器
+    classifier = pipeline(
+        "zero-shot-classification",
+        model="IDEA-CCNL/Erlangshen-Roberta-110M-NLI",
+        device=-1  # CPU
+    )
+
+    # 3. 批量处理
+    enhanced_tags = []
+    for idx, row in df.iterrows():
+        text = clean_html(row["description"])
+        result = classifier(text, CATEGORIES, multi_label=True)
+        # 取score>0.5的类别
+        new_cats = [l for l, s in zip(result["labels"], result["scores"]) if s > 0.5]
+        # 合并原始tags
+        original = [t.strip() for t in str(row["tag"]).split(";") if t.strip()]
+        merged = list(set(original + new_cats))
+        enhanced_tags.append(";".join(merged))
+
+    df["tag_enhanced"] = enhanced_tags
+    df.to_parquet("data/processed/dataset_features_enhanced.parquet")
+```
+
+**步骤2: 修改_prepare_ranking_dataset()添加类别特征**
+位置: `/root/recommendation-system/pipeline/train_models.py` Line 999后
+
+**重要发现** (ranking_training_samples.parquet结构):
+- 包含 2,797,740 条训练样本
+- 关键字段: `request_id`, `page_id`, `dataset_id`, `position`, `label`, `score`, `reason`
+- **page_id字段是target item的ID** (请求页面的dataset_id)
+- position=0表示排名第一的候选
+
+关键修改点:
+1. 使用`page_id`作为target dataset_id (而非position=1的item)
+2. 为每个request中的candidate计算与target(page_id)的tag overlap
+3. 需要访问dataset_features获取target和candidate的tags
+
+**具体实现代码** (在`_prepare_request_ranking_data()`函数中添加，Line 1148-1261后):
+
+```python
+# === Category Relevance Features (NEW) ===
+# 在enriched DataFrame构建完成后，添加target-candidate相关性特征
+
+# 1. 构建tag查找表 (从dataset_features)
+tag_lookup = {}
+for _, row in dataset_features.iterrows():
+    dataset_id = row["dataset_id"]
+    tags_str = row.get("tag", "")
+    tags = [t.strip().lower() for t in str(tags_str).split(";") if t.strip()]
+    tag_lookup[dataset_id] = set(tags)
+
+# 2. 为每条样本计算target-candidate特征
+def compute_tag_features(row):
+    target_id = row["page_id"]  # target是page_id
+    candidate_id = row["dataset_id"]  # candidate是当前item
+
+    target_tags = tag_lookup.get(target_id, set())
+    candidate_tags = tag_lookup.get(candidate_id, set())
+
+    # Overlap count
+    overlap = len(target_tags & candidate_tags)
+
+    # Jaccard similarity
+    union = len(target_tags | candidate_tags)
+    jaccard = overlap / union if union > 0 else 0.0
+
+    # Same top category
+    TOP_CATEGORIES = {"金融", "医疗健康", "政府政务", "交通运输",
+                      "教育培训", "能源环保", "农业", "科技",
+                      "商业零售", "文化娱乐", "社会民生"}
+    target_cats = target_tags & TOP_CATEGORIES
+    candidate_cats = candidate_tags & TOP_CATEGORIES
+    same_cat = 1.0 if len(target_cats & candidate_cats) > 0 else 0.0
+
+    return pd.Series({
+        "tag_overlap_count": float(overlap),
+        "tag_jaccard_similarity": jaccard,
+        "same_top_category": same_cat
+    })
+
+# 3. 应用计算 (注意：这可能较慢，建议向量化)
+category_features = enriched.apply(compute_tag_features, axis=1)
+enriched = pd.concat([enriched, category_features], axis=1)
+
+# 4. 添加到numeric_features列表
+numeric_features.extend(["tag_overlap_count", "tag_jaccard_similarity", "same_top_category"])
+```
+
+**步骤3: 修改推理阶段的特征计算**
+
+需要修改多个函数以支持target context传递:
+
+**3.1 修改`_build_static_ranking_features()`** (Line 1951-2064)
+
+```python
+def _build_static_ranking_features(
+    dataset_ids: List[int],
+    raw_features: pd.DataFrame,
+    dataset_stats: pd.DataFrame,
+    slot_metrics_aggregated: pd.DataFrame,
+    feature_overrides: Optional[pd.DataFrame] = None,
+    stats_overrides: Optional[pd.DataFrame] = None,
+    target_dataset_id: Optional[int] = None,  # 新增参数
+) -> pd.DataFrame:
+    # ... 现有代码 ...
+
+    # 在Line 2018后添加:
+    # === Category Relevance Features ===
+    if target_dataset_id is not None and target_dataset_id in raw_indexed.index:
+        target_row = raw_indexed.loc[target_dataset_id]
+        target_tags_str = target_row.get("tag", "")
+        target_tags = set(t.strip().lower() for t in str(target_tags_str).split(";") if t.strip())
+
+        def calc_overlap(candidate_tags_str):
+            candidate_tags = set(t.strip().lower() for t in str(candidate_tags_str).split(";") if t.strip())
+            return float(len(target_tags & candidate_tags))
+
+        def calc_jaccard(candidate_tags_str):
+            candidate_tags = set(t.strip().lower() for t in str(candidate_tags_str).split(";") if t.strip())
+            union = len(target_tags | candidate_tags)
+            return float(len(target_tags & candidate_tags)) / union if union > 0 else 0.0
+
+        def calc_same_cat(candidate_tags_str):
+            TOP_CATS = {"金融", "医疗健康", "政府政务", "交通运输", "教育培训",
+                        "能源环保", "农业", "科技", "商业零售", "文化娱乐", "社会民生"}
+            candidate_tags = set(t.strip().lower() for t in str(candidate_tags_str).split(";") if t.strip())
+            return 1.0 if len((target_tags & TOP_CATS) & (candidate_tags & TOP_CATS)) > 0 else 0.0
+
+        features["tag_overlap_count"] = selected["tag"].apply(calc_overlap)
+        features["tag_jaccard_similarity"] = selected["tag"].apply(calc_jaccard)
+        features["same_top_category"] = selected["tag"].apply(calc_same_cat)
+    else:
+        features["tag_overlap_count"] = 0.0
+        features["tag_jaccard_similarity"] = 0.0
+        features["same_top_category"] = 0.0
+
+    return features
+```
+
+**3.2 修改`_compute_ranking_features()`** (Line 2067-2200)
+
+添加`target_dataset_id`参数并传递给`_build_static_ranking_features()`
+
+**3.3 修改`_apply_ranking()`** (Line 2311-2442)
+
+从request context获取target_dataset_id并传递:
+```python
+# 在调用_compute_ranking_features时传入target_dataset_id
+# target_dataset_id通常来自recommend_detail API的page_id参数
+```
+
+**3.4 修改API endpoint** (`/recommend/detail`)
+
+确保`page_id`(target dataset)被传递到ranking pipeline
+
+**步骤4: 更新recall_engine_v2保存增强索引**
+增强后需要重新生成:
+- `models/tag_to_items_enhanced.json`
+- `models/item_to_tags_enhanced.json`
+
+#### 5. 测试验证命令
+
+```bash
+# 1. 检查原始tag覆盖率
+python -c "
+import pandas as pd
+df = pd.read_parquet('data/cleaned/dataset_features.parquet')
+total = len(df)
+has_tag = df['tag'].notna() & (df['tag'] != '')
+print(f'Tag覆盖率: {has_tag.sum()}/{total} ({has_tag.mean()*100:.1f}%)')
+"
+
+# 2. 运行tag增强 (实现后)
+python -m pipeline.enhance_tags
+
+# 3. 重新构建特征
+python -m pipeline.build_features_v2
+
+# 4. 重新训练模型
+python -m pipeline.train_models
+
+# 5. 检查特征重要性
+python -c "
+import pickle
+model = pickle.load(open('models/rank_model.pkl', 'rb'))
+for item in model.get('feature_importances', [])[:15]:
+    print(f\"{item['feature']}: {item['importance']:.2f}\")
+"
+```
+
+#### 6. 注意事项
+
+1. **内存优化**: 13,312个item批量处理时注意内存，建议分批处理（每批1000个）
+2. **HTML清理**: description可能包含HTML标签，需要使用BeautifulSoup清理
+3. **空值处理**: description为空时跳过分类，保留原始tags
+4. **索引同步**: 修改tag后必须重建tag_to_items和item_to_tags索引
+5. **特征一致性**: 训练和推理时的特征计算逻辑必须完全一致
+
 ## Work Log
 - [2025-12-30] 任务创建，完成技术方案讨论和选型
+- [2025-12-30] Context-Gathering Agent: 验证代码路径和行号，补充实现细节
