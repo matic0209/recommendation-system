@@ -94,11 +94,10 @@ RANK_MODEL_PATH = MODELS_DIR / "rank_model.pkl"
 RANKING_SAMPLES_PATH = PROCESSED_DIR / "ranking_training_samples.parquet"
 USER_FEATURES_PATH = PROCESSED_DIR / "user_features_v2.parquet"
 
-# Standardized top-level categories for category relevance features
+# Standardized top-level categories for category relevance features (6 core categories)
 TOP_CATEGORIES_SET = frozenset([
-    "金融", "医疗健康", "政府政务", "交通运输",
-    "教育培训", "能源环保", "农业", "科技",
-    "商业零售", "文化娱乐", "社会民生",
+    "金融", "医疗健康", "政府政务",
+    "科技", "商业零售", "教育培训",
 ])
 
 
@@ -1231,9 +1230,29 @@ def _prepare_request_ranking_data(
     # Compute tag-based features using page_id (target) and dataset_id (candidate)
     LOGGER.info("Computing category relevance features...")
 
-    # Build tag lookup from dataset_profile (need tag column separately)
+    # Try to load enhanced tags first (from AI classification), fallback to original tags
     tag_lookup = {}
-    if "tag" in dataset_profile.columns:
+    enhanced_tags_path = MODELS_DIR / "item_to_tags_enhanced.json"
+
+    if enhanced_tags_path.exists():
+        try:
+            with open(enhanced_tags_path, "r", encoding="utf-8") as f:
+                enhanced_tags = json.load(f)
+            # Convert string keys to int and values to sets
+            for dataset_id_str, tags in enhanced_tags.items():
+                tag_lookup[int(dataset_id_str)] = set(t.lower() for t in tags)
+            LOGGER.info(
+                "Loaded enhanced tags from %s (%d items)",
+                enhanced_tags_path,
+                len(tag_lookup),
+            )
+        except Exception as e:
+            LOGGER.warning("Failed to load enhanced tags: %s, falling back to original tags", e)
+            tag_lookup = {}
+
+    # Fallback to original tags if enhanced tags not available
+    if not tag_lookup and "tag" in dataset_profile.columns:
+        LOGGER.info("Using original tags from dataset_profile")
         for _, row in dataset_profile[["dataset_id", "tag"]].iterrows():
             dataset_id = row["dataset_id"]
             tag_lookup[dataset_id] = _parse_tags(row.get("tag", ""))
@@ -1283,6 +1302,68 @@ def _prepare_request_ranking_data(
     del tag_lookup
     gc.collect()
 
+    # === 12-CATEGORY FEATURES ===
+    # Compute features based on 12-category system from zero-shot classification
+    LOGGER.info("Computing 12-category features...")
+
+    category_lookup: Dict[int, Set[str]] = {}
+    categories_path = MODELS_DIR / "item_to_categories.json"
+
+    if categories_path.exists():
+        try:
+            with open(categories_path, "r", encoding="utf-8") as f:
+                item_to_categories = json.load(f)
+            # Convert string keys to int and values to sets
+            for dataset_id_str, cats in item_to_categories.items():
+                if cats:  # Only add if has categories
+                    category_lookup[int(dataset_id_str)] = set(cats)
+            LOGGER.info(
+                "Loaded 12-categories from %s (%d items)",
+                categories_path,
+                len(category_lookup),
+            )
+        except Exception as e:
+            LOGGER.warning("Failed to load 12-categories: %s", e)
+
+    if category_lookup and "page_id" in enriched.columns:
+        # Pre-compute target categories for each unique page_id
+        unique_page_ids = enriched["page_id"].unique()
+        page_id_cats = {pid: category_lookup.get(int(pid), set()) for pid in unique_page_ids if pd.notna(pid)}
+
+        def compute_12cat_features(row):
+            page_id = row.get("page_id")
+            dataset_id = row.get("dataset_id")
+
+            if pd.isna(page_id) or pd.isna(dataset_id):
+                return 0.0, 0.0
+
+            target_cats = page_id_cats.get(int(page_id), set())
+            candidate_cats = category_lookup.get(int(dataset_id), set())
+
+            overlap = len(target_cats & candidate_cats)
+            match = 1.0 if overlap > 0 else 0.0
+
+            return float(overlap), match
+
+        # Vectorized computation
+        cat_results = enriched.apply(compute_12cat_features, axis=1, result_type="expand")
+        enriched["category_overlap"] = cat_results[0].astype(float)
+        enriched["category_match"] = cat_results[1].astype(float)
+
+        LOGGER.info(
+            "12-category features computed - overlap mean: %.3f, match rate: %.3f",
+            enriched["category_overlap"].mean(),
+            enriched["category_match"].mean(),
+        )
+    else:
+        LOGGER.warning("12-category lookup empty or page_id missing, filling with zeros")
+        enriched["category_overlap"] = 0.0
+        enriched["category_match"] = 0.0
+
+    # Free category lookup memory
+    del category_lookup
+    gc.collect()
+
     # MEMORY OPTIMIZATION: Optimize memory before expensive operations
     LOGGER.info("Optimizing enriched DataFrame memory usage...")
     enriched = optimize_dataframe_memory(enriched)
@@ -1294,10 +1375,13 @@ def _prepare_request_ranking_data(
         "score",
         "position",
         "channel_weight",
-        # Category relevance features
+        # Tag-based category relevance features
         "tag_overlap_count",
         "tag_jaccard_similarity",
         "same_top_category",
+        # 12-category features (from zero-shot classification)
+        "category_overlap",
+        "category_match",
     ]
     categorical_features = [
         "channel",
@@ -1778,6 +1862,13 @@ def main() -> None:
         dataset_features = optimize_dataframe_memory(dataset_features_v3)
         del dataset_features_v3
 
+    # Prefer enhanced tags version when available (from enhance_tags.py)
+    dataset_features_enhanced = _load_frame(PROCESSED_DIR / "dataset_features_enhanced.parquet")
+    if not dataset_features_enhanced.empty:
+        LOGGER.info("Using enhanced dataset features with AI-classified tags")
+        dataset_features = optimize_dataframe_memory(dataset_features_enhanced)
+        del dataset_features_enhanced
+
     dataset_stats_v2 = _load_frame(PROCESSED_DIR / "dataset_stats_v2.parquet")
     if not dataset_stats_v2.empty:
         dataset_stats = optimize_dataframe_memory(dataset_stats_v2)
@@ -1837,6 +1928,45 @@ def main() -> None:
     ranking_samples = _load_ranking_samples()
     if not ranking_samples.empty:
         LOGGER.info("Ranking samples: %d rows before optimization", len(ranking_samples))
+
+        # NEGATIVE SAMPLE DOWNSAMPLING: Reduce class imbalance
+        # Default ratio 100 means 1 positive : 100 negatives (1% positive rate)
+        downsample_ratio = int(os.getenv("RANKING_DOWNSAMPLE_RATIO", "100"))
+        if downsample_ratio > 0 and "label" in ranking_samples.columns:
+            positive_samples = ranking_samples[ranking_samples["label"] == 1]
+            negative_samples = ranking_samples[ranking_samples["label"] == 0]
+            original_positive_count = len(positive_samples)
+            original_negative_count = len(negative_samples)
+
+            if original_positive_count > 0 and original_negative_count > 0:
+                target_negative_count = original_positive_count * downsample_ratio
+
+                if original_negative_count > target_negative_count:
+                    # Stratified sampling by request_id to preserve group structure for LambdaRank
+                    if "request_id" in negative_samples.columns:
+                        # Sample proportionally from each request group
+                        sample_frac = target_negative_count / original_negative_count
+                        negative_samples = negative_samples.groupby("request_id", group_keys=False).apply(
+                            lambda x: x.sample(frac=sample_frac, random_state=42) if len(x) > 1 else x
+                        )
+                    else:
+                        negative_samples = negative_samples.sample(n=target_negative_count, random_state=42)
+
+                    ranking_samples = pd.concat([positive_samples, negative_samples], ignore_index=True)
+                    new_positive_rate = 100 * original_positive_count / len(ranking_samples)
+                    LOGGER.info(
+                        "Negative downsampling: %d -> %d negatives (positive rate: %.2f%% -> %.2f%%)",
+                        original_negative_count,
+                        len(negative_samples),
+                        100 * original_positive_count / (original_positive_count + original_negative_count),
+                        new_positive_rate,
+                    )
+                else:
+                    LOGGER.info(
+                        "Skipping downsampling: current ratio %.2f:1 already below target %d:1",
+                        original_negative_count / original_positive_count,
+                        downsample_ratio,
+                    )
 
         # MEMORY OPTIMIZATION: Optional sampling to reduce memory footprint
         max_samples = int(os.getenv("MAX_RANKING_SAMPLES", "0"))

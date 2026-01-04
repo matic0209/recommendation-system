@@ -185,6 +185,7 @@ DEFAULT_CHANNEL_WEIGHTS = {
     "content": 1.0,   # 提升（原0.8）- 增强内容相关性
     "vector": 0.8,    # 提升（原0.5）- 但仍低于个性化
     "popular": 0.02,  # 降低（原0.1）- Popular质量过滤后减少权重，减少负分影响
+    "12cat": 0.8,     # 12类别召回 - 与vector相同权重，增强类别相关性
 }
 
 
@@ -721,7 +722,15 @@ def _load_recall_artifacts(base_dir: Path) -> Dict[str, Any]:
         recall_assets["user_similarity"] = user_similarity
 
     for name in ["tag_to_items", "item_to_tags", "category_index", "price_bucket_index"]:
-        data = _load_json_file(base_dir / f"{name}.json")
+        # Prefer enhanced version for tag indices (from enhance_tags.py)
+        if name in {"tag_to_items", "item_to_tags"}:
+            data = _load_json_file(base_dir / f"{name}_enhanced.json")
+            if data:
+                LOGGER.info("Using enhanced %s index", name)
+            else:
+                data = _load_json_file(base_dir / f"{name}.json")
+        else:
+            data = _load_json_file(base_dir / f"{name}.json")
         if data:
             # Convert lists back to sets for faster lookup where needed
             if name in {"tag_to_items", "category_index", "price_bucket_index"}:
@@ -739,6 +748,22 @@ def _load_recall_artifacts(base_dir: Path) -> Dict[str, Any]:
     faiss_meta = _load_json_file(base_dir / "faiss_recall.meta.json")
     if faiss_meta:
         recall_assets["faiss_meta"] = faiss_meta
+
+    # Load 12-category indices (clean categories from enhance_tags.py)
+    category_to_items = _load_json_file(base_dir / "category_to_items.json")
+    if category_to_items:
+        # Convert lists to sets for faster lookup
+        recall_assets["category_to_items"] = {
+            key: {int(v) for v in value} for key, value in category_to_items.items()
+        }
+        LOGGER.info("Loaded category_to_items with %d categories", len(category_to_items))
+
+    item_to_categories = _load_json_file(base_dir / "item_to_categories.json")
+    if item_to_categories:
+        recall_assets["item_to_categories"] = {
+            int(k): v for k, v in item_to_categories.items()
+        }
+        LOGGER.info("Loaded item_to_categories with %d items", len(item_to_categories))
 
     return recall_assets
 
@@ -1519,7 +1544,29 @@ def _augment_with_multi_channel(
             for dataset_id, norm_score in sorted(normalized_tag_scores.items(), key=lambda x: x[1], reverse=True)[: limit * 2]:
                 _bump(int(dataset_id), norm_score * 0.4, "tag")
 
-    # Category recall
+    # 12-category recall (standard categories from zero-shot classification)
+    item_to_categories = recall.get("item_to_categories", {})
+    category_to_items = recall.get("category_to_items", {})
+    target_categories = item_to_categories.get(target_id, [])
+    if target_categories and category_to_items:
+        category_candidate_scores: Dict[int, float] = {}
+        target_cat_set = set(target_categories)
+        for cat in target_categories:
+            for candidate in category_to_items.get(cat, set()):
+                if candidate == target_id:
+                    continue
+                candidate_cats = set(item_to_categories.get(candidate, []))
+                overlap = len(target_cat_set & candidate_cats)
+                if overlap:
+                    category_candidate_scores[int(candidate)] = category_candidate_scores.get(int(candidate), 0.0) + overlap
+
+        # 归一化并加入候选
+        if category_candidate_scores:
+            normalized_cat_scores = _normalize_channel_scores(category_candidate_scores)
+            for dataset_id, norm_score in sorted(normalized_cat_scores.items(), key=lambda x: x[1], reverse=True)[: limit * 2]:
+                _bump(int(dataset_id), norm_score * 0.5, "12cat")  # Higher weight for 12-category match
+
+    # Company category recall (legacy)
     category_index = recall.get("category_index", {})
     company = state.metadata.get(target_id, {}).get("company")
     if company:

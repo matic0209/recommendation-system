@@ -30,6 +30,7 @@ DEFAULT_CHANNEL_WEIGHTS: Dict[str, float] = {
     "price": 0.2,
     "usercf": 0.6,
     "image": 0.4,
+    "12cat": 0.8,  # 12类别召回 - 与vector相同权重
 }
 
 
