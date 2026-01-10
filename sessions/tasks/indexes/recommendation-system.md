@@ -13,6 +13,7 @@ description: 推荐算法改进、召回策略优化、排序模型调优、多�
 - `h-implement-recommendation-category-enhancement/` - 推荐类别增强：使用零样本分类模型自动增强tags、添加类别相关性特征、重训练Ranker模型
 - `h-fix-tag-enhancement-category-output/` - 修复标签增强输出：分离12类别与原始标签，创建纯净类别索引文件
 - `h-implement-ranking-category-features.md` - 排序模型类别特征优化：添加12类别特征、负样本下采样、增加12cat召回权重
+- `h-implement-ctr-optimization.md` - 推荐系统CTR优化：提升点击率从0.14%到0.5%+，推广content_boost策略，改善位置衰减
 
 ### Medium Priority
 <!-- 中优先级任务将在此添加 -->
