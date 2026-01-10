@@ -1,0 +1,365 @@
+================================================================================
+                    高质量数据集管理系统 - 字段规范 V1.0
+================================================================================
+                          生成时间: 2026-01-10
+                    参考标准: 《高质量数据集建设指南》(2025)
+================================================================================
+
+
+一、基础标识信息
+--------------------------------------------------------------------------------
+字段名                  类型              必填    说明
+--------------------------------------------------------------------------------
+id                      UUID/BIGINT       是      系统自动生成唯一标识
+dataset_code            VARCHAR(50)       是      数据集编码（业务编号）
+dataset_name            VARCHAR(200)      是      数据集名称
+dataset_name_en         VARCHAR(200)      否      英文名称
+version                 VARCHAR(20)       是      版本号
+status                  ENUM              是      状态：草稿/待审核/已发布/已下架
+
+
+二、内容描述信息
+--------------------------------------------------------------------------------
+字段名                  类型              必填    说明                    质量要求
+--------------------------------------------------------------------------------
+summary                 VARCHAR(500)      是      摘要描述（简介）        100-300字
+description             TEXT              是      详细描述                ≥500字
+keywords                JSON/TEXT         是      关键词列表              ≥5个关键词
+category_l1             VARCHAR(50)       是      一级分类
+category_l2             VARCHAR(50)       是      二级分类
+category_l3             VARCHAR(50)       否      三级分类
+tags                    JSON              是      标签数组                ≥3个标签
+domain                  VARCHAR(50)       是      所属领域
+knowledge_level         ENUM              是      知识层级：通识/行业通识/行业专识
+
+
+三、数据规格信息
+--------------------------------------------------------------------------------
+字段名                  类型              必填    说明
+--------------------------------------------------------------------------------
+data_format             JSON              是      数据格式，如["CSV","JSON","Parquet"]
+file_size               BIGINT            是      文件大小（字节）
+file_size_display       VARCHAR(20)       否      可读大小，如"1.2 GB"
+record_count            BIGINT            是      记录/样本数量
+field_count             INT               是      字段/特征数量
+data_schema             JSON              是      数据结构定义（见附录）
+sample_data             JSON              是      样本数据（3-5条）
+modality                JSON              是      数据模态，如["文本","表格","图像"]
+language                JSON              是      语言，如["zh-CN","en-US"]
+encoding                VARCHAR(20)       是      编码格式，如"UTF-8"
+compression             VARCHAR(20)       否      压缩格式，如"gzip/zip/none"
+
+
+四、时间与时效信息
+--------------------------------------------------------------------------------
+字段名                  类型              必填    说明
+--------------------------------------------------------------------------------
+time_range_start        DATE              是      数据时间范围-开始
+time_range_end          DATE              是      数据时间范围-结束
+time_granularity        ENUM              是      时间粒度：实时/分钟/小时/日/月/年
+update_frequency        ENUM              是      更新频率：实时/日更/周更/月更/季更/年更/一次性
+last_update_time        DATETIME          是      最后更新时间
+next_update_time        DATETIME          否      预计下次更新
+validity_period         INT               否      有效期（天）
+create_time             DATETIME          是      创建时间（自动生成）
+publish_time            DATETIME          否      发布时间
+
+
+五、来源与权属信息
+--------------------------------------------------------------------------------
+字段名                  类型              必填    说明
+--------------------------------------------------------------------------------
+data_source             TEXT              是      数据来源说明
+source_type             ENUM              是      来源类型：官方/企业/学术/众包/合成
+source_url              VARCHAR(500)      否      原始数据链接
+provider_name           VARCHAR(100)      是      提供机构名称
+provider_type           ENUM              是      机构类型：政府/企业/高校/研究机构/个人
+provider_contact        VARCHAR(100)      否      联系方式
+author                  VARCHAR(100)      否      作者/负责人
+copyright_owner         VARCHAR(100)      是      版权所有者
+license_type            ENUM              是      授权类型：CC-BY/商用/内部/定制
+license_detail          TEXT              否      授权详情
+
+
+六、质量与标注信息
+--------------------------------------------------------------------------------
+字段名                  类型              必填    说明
+--------------------------------------------------------------------------------
+quality_score           DECIMAL(5,2)      否      质量评分（0-100）
+completeness_rate       DECIMAL(5,2)      是      完整性比例（%）
+accuracy_rate           DECIMAL(5,2)      否      准确性比例（%）
+consistency_rate        DECIMAL(5,2)      否      一致性比例（%）
+null_rate               DECIMAL(5,2)      是      空值比例（%）
+duplicate_rate          DECIMAL(5,2)      是      重复比例（%）
+is_labeled              BOOLEAN           是      是否有标注
+label_type              JSON              否      标注类型，如["分类","实体","情感"]
+label_method            ENUM              否      标注方式：人工/自动/半自动
+label_spec              TEXT              否      标注规范说明
+annotator_count         INT               否      标注人数
+annotation_agreement    DECIMAL(5,2)      否      标注一致性（Kappa系数）
+
+
+七、安全与合规信息
+--------------------------------------------------------------------------------
+字段名                  类型              必填    说明
+--------------------------------------------------------------------------------
+security_level          ENUM              是      安全等级：公开/内部/机密/绝密
+contains_pii            BOOLEAN           是      是否含个人信息
+pii_handling            ENUM              否      PII处理方式：脱敏/匿名化/加密
+contains_sensitive      BOOLEAN           是      是否含敏感信息
+sensitive_type          JSON              否      敏感类型，如["商业秘密","医疗信息"]
+compliance_check        BOOLEAN           是      是否通过合规审查
+compliance_cert         VARCHAR(100)      否      合规认证编号
+gdpr_compliant          BOOLEAN           否      是否符合GDPR
+data_residency          VARCHAR(50)       是      数据存储地区
+
+
+八、应用与场景信息
+--------------------------------------------------------------------------------
+字段名                  类型              必填    说明
+--------------------------------------------------------------------------------
+use_cases               JSON              是      应用场景
+target_users            JSON              是      目标用户
+ai_applicable           BOOLEAN           是      是否适用于AI训练
+ai_tasks                JSON              否      适用AI任务，如["分类","预测","NLP"]
+model_benchmark         JSON              否      模型基准测试结果
+related_papers          JSON              否      相关论文链接
+related_datasets        JSON              否      关联数据集ID
+
+
+九、定价与服务信息
+--------------------------------------------------------------------------------
+字段名                  类型              必填    说明
+--------------------------------------------------------------------------------
+price_type              ENUM              是      定价类型：免费/付费/订阅/按量
+price                   DECIMAL(10,2)     是      单价（元）
+currency                VARCHAR(10)       是      币种
+trial_available         BOOLEAN           是      是否可试用
+trial_limit             VARCHAR(50)       否      试用限制
+api_available           BOOLEAN           是      是否提供API
+download_available      BOOLEAN           是      是否可下载
+support_level           ENUM              是      支持级别：基础/标准/高级
+
+
+十、多媒体资源
+--------------------------------------------------------------------------------
+字段名                  类型              必填    说明
+--------------------------------------------------------------------------------
+cover_image             VARCHAR(255)      是      封面图URL
+preview_images          JSON              否      预览图列表
+documentation_url       VARCHAR(255)      是      文档链接
+video_intro             VARCHAR(255)      否      视频介绍
+attachments             JSON              否      附件列表
+
+
+十一、统计与反馈信息（系统自动维护）
+--------------------------------------------------------------------------------
+字段名                  类型              说明
+--------------------------------------------------------------------------------
+view_count              BIGINT            浏览次数
+download_count          BIGINT            下载次数
+purchase_count          BIGINT            购买次数
+favorite_count          BIGINT            收藏次数
+rating_avg              DECIMAL(3,2)      平均评分
+rating_count            INT               评分人数
+citation_count          INT               引用次数
+last_access_time        DATETIME          最后访问时间
+
+
+================================================================================
+                              附录：枚举值定义
+================================================================================
+
+status（状态）:
+  - draft: 草稿
+  - pending_review: 待审核
+  - published: 已发布
+  - archived: 已下架
+
+knowledge_level（知识层级）:
+  - general: 通识
+  - industry_general: 行业通识
+  - industry_specific: 行业专识
+
+time_granularity（时间粒度）:
+  - realtime: 实时
+  - minute: 分钟级
+  - hourly: 小时级
+  - daily: 日级
+  - monthly: 月级
+  - yearly: 年级
+
+update_frequency（更新频率）:
+  - realtime: 实时更新
+  - daily: 每日更新
+  - weekly: 每周更新
+  - monthly: 每月更新
+  - quarterly: 每季更新
+  - yearly: 每年更新
+  - once: 一次性
+
+source_type（来源类型）:
+  - official: 官方数据
+  - enterprise: 企业数据
+  - academic: 学术数据
+  - crowdsourced: 众包数据
+  - synthetic: 合成数据
+
+provider_type（机构类型）:
+  - government: 政府机构
+  - enterprise: 企业
+  - university: 高校
+  - research: 研究机构
+  - individual: 个人
+
+license_type（授权类型）:
+  - CC-BY-4.0: 署名
+  - CC-BY-SA-4.0: 署名-相同方式共享
+  - CC-BY-NC-4.0: 署名-非商业性使用
+  - CC-BY-NC-SA-4.0: 署名-非商业性使用-相同方式共享
+  - commercial: 商业授权
+  - internal: 内部使用
+  - custom: 定制授权
+
+security_level（安全等级）:
+  - public: 公开
+  - internal: 内部
+  - confidential: 机密
+  - secret: 绝密
+
+label_method（标注方式）:
+  - manual: 人工标注
+  - automatic: 自动标注
+  - semi_automatic: 半自动标注
+
+price_type（定价类型）:
+  - free: 免费
+  - paid: 付费
+  - subscription: 订阅
+  - usage_based: 按量付费
+
+support_level（支持级别）:
+  - basic: 基础支持
+  - standard: 标准支持
+  - premium: 高级支持
+
+
+================================================================================
+                           附录：data_schema 结构示例
+================================================================================
+
+{
+  "fields": [
+    {
+      "name": "stock_code",
+      "type": "string",
+      "description": "股票代码",
+      "nullable": false,
+      "example": "600000"
+    },
+    {
+      "name": "revenue",
+      "type": "decimal",
+      "description": "营业收入（万元）",
+      "nullable": true,
+      "unit": "万元",
+      "precision": 2
+    },
+    {
+      "name": "report_date",
+      "type": "date",
+      "description": "报告期",
+      "format": "YYYY-MM-DD"
+    }
+  ],
+  "primary_key": ["stock_code", "report_date"],
+  "indexes": ["stock_code", "report_date"]
+}
+
+
+================================================================================
+                           附录：完整录入示例（JSON）
+================================================================================
+
+{
+  "dataset_code": "DS-2024-FIN-0001",
+  "dataset_name": "2024年A股上市公司财务数据集",
+  "version": "v1.0.0",
+  "status": "published",
+
+  "summary": "涵盖沪深两市5000+上市公司2020-2024年完整财务报表数据",
+  "description": "本数据集汇集了中国A股市场全部上市公司近五年的财务数据...",
+  "keywords": ["A股", "财务报表", "上市公司", "年报", "季报"],
+  "category_l1": "金融财经",
+  "category_l2": "证券市场",
+  "category_l3": "财务数据",
+  "tags": ["财务分析", "投资研究", "量化策略", "基本面"],
+  "domain": "金融",
+  "knowledge_level": "industry_specific",
+
+  "data_format": ["CSV", "Parquet"],
+  "file_size": 2147483648,
+  "file_size_display": "2.0 GB",
+  "record_count": 5000000,
+  "field_count": 120,
+  "modality": ["表格"],
+  "language": ["zh-CN"],
+  "encoding": "UTF-8",
+
+  "time_range_start": "2020-01-01",
+  "time_range_end": "2024-12-31",
+  "time_granularity": "quarterly",
+  "update_frequency": "quarterly",
+  "last_update_time": "2024-12-31 23:59:59",
+
+  "data_source": "上海证券交易所、深圳证券交易所公开披露数据",
+  "source_type": "official",
+  "provider_name": "XX金融数据研究院",
+  "provider_type": "research",
+  "copyright_owner": "XX公司",
+  "license_type": "commercial",
+
+  "completeness_rate": 99.2,
+  "null_rate": 0.8,
+  "duplicate_rate": 0.0,
+  "is_labeled": false,
+
+  "security_level": "public",
+  "contains_pii": false,
+  "contains_sensitive": false,
+  "compliance_check": true,
+  "data_residency": "中国大陆",
+
+  "use_cases": ["财务分析", "投资决策", "量化建模", "风险评估"],
+  "target_users": ["量化分析师", "投资经理", "金融研究员"],
+  "ai_applicable": true,
+  "ai_tasks": ["预测", "分类", "异常检测"],
+
+  "price_type": "paid",
+  "price": 599.00,
+  "currency": "CNY",
+  "trial_available": true,
+  "trial_limit": "100条样本",
+  "api_available": true,
+  "download_available": true,
+  "support_level": "standard",
+
+  "cover_image": "https://cdn.example.com/covers/fin-2024.jpg",
+  "documentation_url": "https://docs.example.com/ds-2024-fin-0001"
+}
+
+
+================================================================================
+                              高质量评分标准
+================================================================================
+
+根据国家标准《高质量数据集质量评测规范》，需达到90分以上：
+
+维度                权重    评分标准
+--------------------------------------------------------------------------------
+文档完整性          30%     description ≥500字, keywords ≥5个, data_schema完整
+内容质量            40%     tags ≥3个, completeness_rate ≥95%, null_rate ≤5%
+多媒体丰富度        20%     cover_image必填, preview_images ≥3张
+元数据规范          10%     create_time, provider_name, license_type 完整
+
+================================================================================
