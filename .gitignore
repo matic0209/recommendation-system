@@ -171,3 +171,11 @@ sessions/sessions-state.json
 sessions/package.json
 sessions/transcripts/
 sessions/.archived/
+
+# ==== 本地测试/排查产生的文件（不入库）====
+_compare/
+models.bak_pre_train/
+.env.local
+logs/*.html
+logs/*.log
+docs/验证看板-本地.html
