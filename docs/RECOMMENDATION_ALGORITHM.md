@@ -1,7 +1,7 @@
 # 推荐系统算法说明文档
 
-> 最后更新: 2026-01-28
-> 版本: v2.0 (含12cat类别召回)
+> 最后更新: 2026-02
+> 版本: v2.1 (权重体系调整 + 相关度特征修复 + 环境变量补齐)
 
 ## 目录
 
@@ -61,19 +61,19 @@
                                     ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │                        质量过滤 (Quality Filter)                     │
-│                    负分截断 + 百分位过滤(P30)                         │
+│                    百分位过滤(P30, 砍掉最差 30%)                      │
 └─────────────────────────────────────────────────────────────────────┘
                                     │
                                     ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │                        MMR重排 (Reranking)                           │
-│                    λ=0.7 (70%相关性 + 30%多样性)                      │
+│           λ=0.5(detail)/0.4(similar)（相关性 vs 多样性）              │
 └─────────────────────────────────────────────────────────────────────┘
                                     │
                                     ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │                        探索 (Exploration)                            │
-│                    ε=0.15 (15%随机探索)                              │
+│                    ε=0.10 (10%随机探索，仅 detail)                    │
 └─────────────────────────────────────────────────────────────────────┘
                                     │
                                     ▼
@@ -143,7 +143,7 @@ final_score = Σ(channel_weight × normalized_score)
 | 算法 | TF-IDF + 余弦相似度 |
 | 分数范围 | [0.2, 0.9] |
 | 归一化 | Min-Max |
-| 默认权重 | 1.0 |
+| 默认权重 | 0.9 |
 | 数据源 | 数据集描述、标签 |
 
 ### 3. Vector召回 (语义向量)
@@ -155,7 +155,7 @@ final_score = Σ(channel_weight × normalized_score)
 | 算法 | SBERT embedding + 余弦相似度 |
 | 分数范围 | [15, 22] (原始) |
 | 归一化 | Min-Max |
-| 默认权重 | 0.8 |
+| 默认权重 | 0.6 |
 | 向量维度 | 768 |
 
 ### 4. Category召回 (12cat类别召回) ⭐
@@ -167,8 +167,23 @@ final_score = Σ(channel_weight × normalized_score)
 | 算法 | 类别匹配 + 类别重叠度评分 |
 | 分数范围 | [0, 1] |
 | 归一化 | 类别数归一化 |
-| 默认权重 | 1.0 |
+| 加分系数 | 0.6（`DEFAULT_AUGMENT_WEIGHTS["12cat"]`，旧版为硬编码 0.5） |
 | 类别数量 | 13个 |
+
+> ⚠️ **类别召回不参与"归一化×权重"的融合计算**，它是在归一化之后直接加一个绝对分
+> （`app/main.py` 的 `_augment_with_multi_channel`），因此它的 0.6 与其他渠道的
+> 权重（behavior/content/vector/popular）**不是同一量纲，不能直接比大小**。
+> 可通过实验参数 `augment_12cat_weight` 覆盖。
+
+### 5. 辅助召回加分系数（绝对分量纲）
+
+| 渠道 | 系数 | 来源 |
+|------|------|------|
+| tag | 0.4 | `DEFAULT_AUGMENT_WEIGHTS` |
+| 12cat | 0.6 | 同上 |
+| category（同公司，遗留） | 0.3 | 同上 |
+| price（价格分桶） | 0.2 | 同上 |
+| usercf（相似用户） | 0.6 | 同上 |
 
 #### 支持的类别 (13类)
 
@@ -199,7 +214,8 @@ final_score = Σ(channel_weight × normalized_score)
 classifier = pipeline("zero-shot-classification", model=MODEL_NAME)
 result = classifier(text, candidate_labels=TOP_CATEGORIES, multi_label=True)
 
-# 阈值: 0.3 (置信度 >= 0.3 则分配该类别)
+# 阈值: 0.5 (DEFAULT_THRESHOLD，置信度 >= 0.5 才分配该类别)
+# 旧文档写的 0.3 是历史值；想提高覆盖率可用 python -m pipeline.enhance_tags --threshold 0.3
 ```
 
 #### 类别召回逻辑
@@ -299,28 +315,30 @@ params = {
 
 ## 质量控制
 
-### 负分硬截断
+### 负分硬截断（历史机制，已下线）
 
-移除排序分数为负的低质量item。
+> 2025-12-27 引入的"直接移除 score < 0 的候选"已不再存在于 `app/main.py`，
+> 现行为**百分位过滤**，下文为其真实实现。
 
-```python
-# 过滤负分item
-positive_items = [item for item in candidates if item.score >= 0]
-
-# Fallback: 如果全部为负分，保留分数最高的50%
-if len(positive_items) == 0:
-    sorted_items = sorted(candidates, key=lambda x: x.score, reverse=True)
-    positive_items = sorted_items[:max(5, len(sorted_items) // 2)]
-```
+负分只代表"LightGBM 原始预测分低于本次候选的平均水平"，并不是绝对质量判断，
+因此现在用相对分位的统一口径处理。
 
 ### 百分位过滤 (P30)
 
-移除分数处于底部30%的item。
+移除分数处于底部 30% 的候选（默认阈值 `FILTER_PERCENTILE = 30`）。
 
 ```python
-threshold = np.percentile(scores, 30)
-filtered_items = [item for item in candidates if item.score >= threshold]
+if total_items >= 10:                      # 候选 < 10 个时不启用过滤
+    threshold = np.percentile(score_values, 30)
+    low_score_items = [i for i, s in scores.items() if s < threshold]
+    if len(low_score_items) > total_items * 0.5:   # 安全兜底
+        keep_ids = 分数最高的 50%（至少 5 个）
+        low_score_items = [i for i in low_score_items if i not in keep_ids]
 ```
+
+- 阈值可调位置：`app/main.py` 的 `FILTER_PERCENTILE` / `MIN_CANDIDATES_FOR_FILTER`
+- 日志关键字：`Percentile filter (p30, threshold=...)`
+
 
 ---
 
@@ -340,9 +358,11 @@ MMR = λ × Relevance(item) - (1-λ) × max(Similarity(item, selected))
 
 | 参数 | 值 | 说明 |
 |------|-----|------|
-| λ (lambda) | 0.7 | 相关性权重 |
-| 1-λ | 0.3 | 多样性权重 |
+| λ (lambda) | detail 0.5 / similar 0.4 | 相关性权重（越大越偏相关性） |
+| 1-λ | 0.5 / 0.6 | 多样性权重 |
 | 相似度计算 | Jaccard | 基于标签的相似度 |
+| 场景修正 | search→0.6、landing/home→0.3、移动端 −0.1 | 见 `_compute_mmr_lambda` |
+| 环境变量 | `MMR_LAMBDA` / `MMR_LAMBDA_SIMILAR` | 调整基准值（0.1~0.9） |
 
 ---
 
@@ -350,12 +370,15 @@ MMR = λ × Relevance(item) - (1-λ) × max(Similarity(item, selected))
 
 ### Epsilon-Greedy
 
-以一定概率插入随机item，平衡利用与探索。
+以一定概率把结果尾部的条目替换为随机数据集，平衡利用与探索。
 
 | 参数 | 值 | 说明 |
 |------|-----|------|
-| ε (epsilon) | 0.15 | 探索概率 |
-| 1-ε | 0.85 | 利用概率 |
+| ε (epsilon) | 0.10 | 探索概率（原硬编码 0.15） |
+| 1-ε | 0.90 | 利用概率 |
+| 环境变量 | `EXPLORATION_EPSILON` | 可调范围 0~0.5 |
+| 生效范围 | 仅 `/recommend/detail` | `/similar` 不做探索 |
+
 
 ---
 
@@ -364,24 +387,79 @@ MMR = λ × Relevance(item) - (1-λ) × max(Similarity(item, selected))
 ### 渠道权重
 
 ```python
+# app/main.py
 DEFAULT_CHANNEL_WEIGHTS = {
-    "behavior": 1.2,   # 行为协同
-    "content": 1.0,    # 内容相似
-    "vector": 0.8,     # 语义向量
-    "category": 1.0,   # 类别召回
-    "popular": 0.1,    # 热门推荐
+    "vector": 1.2,    # 语义向量 —— 一级（业务规则：vector = content > behavior > popular）
+    "content": 1.2,   # 内容/标签相似 —— 一级
+    "behavior": 0.9,  # 行为协同 —— 二级
+    "popular": 0.05,  # 全局热门 —— 三级（仅兜底，且最终列表最多占 25%）
+    "12cat": 0.8,     # 仅作为排序特征 channel_weight 的取值，不参与融合
+}
+
+# 辅助渠道加分系数（绝对分量纲，与上面的融合权重不是同一套刻度）
+DEFAULT_AUGMENT_WEIGHTS = {
+    "tag": 0.4, "12cat": 0.6, "category": 0.3, "price": 0.2, "usercf": 0.6,
 }
 ```
+
+> ⚠️ **上面的默认值可能不生效**：服务启动时若存在 `models/channel_weights.json`
+> （由 `pipeline/train_channel_weights.py` 每天按真实 CTR/CVR 重算），其中的
+> `behavior/content/vector/popular` 会覆盖代码默认值——但**覆盖结果会被
+> `_enforce_channel_weight_order()` 限幅（±40%）并强制保序**，
+> `vector = content > behavior > popular` 这个业务次序不会被反转。
+> 调权重前请先查看该文件；详细说明见 [推荐权重与推荐策略调整说明](./推荐权重调整说明.md)。
+
+### 最终列表配额（2026-02 新增）
+
+分数排完序之后还有一层"业务配额"，避免某类商品/某个渠道刷屏：
+
+| 规则 | 参数 | 默认值 | 效果（limit=12） |
+|------|------|--------|-----------------|
+| popular 来源占比上限 | `MAX_POPULAR_SHARE` | 0.25 | 最多 3 条来自全局热门 |
+| 非目标行业单一类别上限 | `MAX_OTHER_CATEGORY_SHARE` | 0.25 | 最多 3 条同属某个"与当前数据集无关"的行业类别 |
+| 目标自身行业 | — | 豁免 | 鼠标指针详情页可以正常返回多条鼠标指针 |
+
+实现位置：`app/main.py` 的 `_apply_list_quotas()`（在 MMR 之后、探索之前），
+候选不足时会放宽补齐以保证返回条数不缩水，并记录 `List quota applied` 日志。
+
+### 在售状态过滤
+
+推荐链路增加了"不可售/已下架数据集"的剔除能力（`_prune_unavailable_datasets` /
+`RECO_EXCLUDED_DATASET_IDS` / `models/excluded_dataset_ids.json`）：
+被剔除的数据集不会出现在召回、探索或兜底列表里。实测线上曾出现
+`datasetStatus=2`（已下架）的数据被推荐，此机制用于兜底；根治需要让特征表
+带上在售标记。
+
+### 动态权重调整
+
+`_compute_dynamic_channel_weights` 会在数据稀疏时把 `behavior`/`content`/`vector`
+的权重转移给其他渠道，**转移量按各目标渠道当前权重的占比分配**（旧版为等额均分，
+会把 popular 从 0.02 抬到 0.22）。触发条件：无用户历史、邻居渠道样本 < 3、
+无向量、无标签。
 
 ### 环境变量
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| POPULAR_MIN_PRICE | 0.5 | 热门召回最低价格 |
-| POPULAR_MIN_INTERACTION | 10 | 热门召回最低交互数 |
-| POPULAR_MAX_INACTIVE_DAYS | 730 | 热门召回最大不活跃天数 |
-| MMR_LAMBDA | 0.7 | MMR相关性权重 |
-| EXPLORATION_EPSILON | 0.15 | 探索概率 |
+| POPULAR_MIN_PRICE | 0.5 | 热门召回最低价格（**训练阶段**，每日流水线） |
+| POPULAR_MIN_INTERACTION | 10 | 热门召回最低交互数（训练阶段） |
+| POPULAR_MAX_INACTIVE_DAYS | 730 | 热门召回最大不活跃天数（训练阶段） |
+| POPULAR_ENABLE_FILTER | true | 是否启用训练阶段质量过滤 |
+| MMR_LAMBDA | 0.5 | `/recommend/detail` 的 MMR 相关性基准 λ（0.1~0.9） |
+| MMR_LAMBDA_SIMILAR | 0.4 | `/similar` 的 MMR 相关性基准 λ（0.1~0.9） |
+| EXPLORATION_EPSILON | 0.10 | 探索率（0~0.5），仅 `/recommend/detail` 生效 |
+
+> 这三个 MMR/探索相关的环境变量是本次改动新补齐的（此前文档写了但代码未读取，
+> λ/ε 是硬编码）。写错值只会回退默认值并打告警，不会导致请求异常。
+> 热门召回的**运行时**质量门槛（`price < 1.90 且 交互 < 66`、`不活跃 > 180 天 且 交互 < 30`）
+> 目前是代码内常量，见 `app/main.py` 的 `_combine_scores_with_weights`。
+
+### 实验参数（config/experiments.yaml，热加载）
+
+| 参数 | 作用 |
+|------|------|
+| `behavior_weight` / `content_weight` / `vector_weight` / `popular_weight` | 覆盖融合层渠道权重 |
+| `augment_tag_weight` / `augment_12cat_weight` / `augment_category_weight` / `augment_price_weight` / `augment_usercf_weight` | 覆盖辅助渠道加分系数 |
 
 ### 索引文件
 
@@ -391,6 +469,8 @@ DEFAULT_CHANNEL_WEIGHTS = {
 | models/category_to_items.json | 类别→数据集映射 | 13 categories |
 | models/top_items.json | 热门榜单 | - |
 | models/lightgbm_ranker.txt | 排序模型 | - |
+| models/channel_weights.json | 每日 CTR 训练出的渠道权重（会覆盖代码默认值） | - |
+
 
 ---
 
@@ -465,9 +545,10 @@ python -m pipeline.enhance_tags --since 2025-10-01 --threshold 0.3
 
 | 日期 | 版本 | 更新内容 |
 |------|------|---------|
+| 2026-02 | v2.1 | 权重体系调整：content 0.9 / vector 0.6 / popular 0.05；辅助渠道系数改为 `DEFAULT_AUGMENT_WEIGHTS` 可配（12cat 0.5→0.6）；动态权重改为按比例转移（修复 popular 被放大 11 倍）；**修复排序模型 5 个相关度特征在推理端恒为 0 的训练/推理不一致问题**；补齐 `MMR_LAMBDA` / `MMR_LAMBDA_SIMILAR` / `EXPLORATION_EPSILON` 环境变量（探索率 0.15→0.10）；曝光日志记录实际生效权重。详见 [推荐权重调整说明](./推荐权重调整说明.md) |
 | 2026-01-28 | v2.0 | 添加"数字产品"类别; 修复HTML实体解码; 添加--since参数 |
 | 2025-12-28 | v1.3 | Popular召回双层质量过滤 |
-| 2025-12-27 | v1.2 | 负分硬截断机制; Tag召回大小写修复 |
+| 2025-12-27 | v1.2 | 负分硬截断机制（后续已被百分位过滤取代）; Tag召回大小写修复 |
 | 2025-12-20 | v1.1 | 12cat类别召回上线 |
 | 2025-12-01 | v1.0 | 初始版本 |
 
@@ -478,6 +559,9 @@ python -m pipeline.enhance_tags --since 2025-10-01 --threshold 0.3
 | 文件 | 说明 |
 |------|------|
 | `app/main.py` | 推荐API主逻辑 |
-| `pipeline/enhance_tags.py` | 标签增强/分类脚本 |
+| `pipeline/enhance_tags.py` | 标签增强/分类脚本（类别体系来源，默认阈值 0.5） |
 | `pipeline/train_models.py` | 模型训练脚本 |
+| `pipeline/train_channel_weights.py` | 每日按 CTR/CVR 重算 `models/channel_weights.json` |
+| `scripts/verify_channel_weight_changes.py` | 权重/相关度特征的运行时自检脚本 |
+| `docs/推荐权重调整说明.md` | 权重调参指南（生效层级、改哪里、如何验证回滚） |
 | `CLAUDE.md` | 项目开发指南 |
