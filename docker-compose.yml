@@ -12,6 +12,7 @@ services:
   redis:
     image: redis:7-alpine
     container_name: redis
+    restart: unless-stopped
     command: redis-server --appendonly yes --maxmemory 2gb --maxmemory-policy allkeys-lru
     ports:
       - "${REDIS_HOST_PORT:-6379}:6379"
@@ -28,6 +29,7 @@ services:
   mlflow:
     image: ghcr.io/mlflow/mlflow:v2.16.0
     container_name: mlflow
+    restart: unless-stopped
     <<: *default-env
     environment:
       MLFLOW_BACKEND_STORE_URI: sqlite:///mlflow/mlflow.db
@@ -46,6 +48,7 @@ services:
       dockerfile: Dockerfile
     image: recommend-recommendation-api
     container_name: recommendation-api
+    restart: unless-stopped
     <<: *default-env
     environment:
       REDIS_URL: redis://redis:6379/0
@@ -91,6 +94,7 @@ services:
   report-viewer:
     image: recommend-recommendation-api
     container_name: report-viewer
+    restart: unless-stopped
     <<: *default-env
     environment:
       DAILY_REPORT_DIR: /app/data/evaluation/daily_reports
@@ -156,6 +160,7 @@ services:
   postgres-airflow:
     image: postgres:15
     container_name: postgres-airflow
+    restart: unless-stopped
     environment:
       POSTGRES_USER: airflow
       POSTGRES_PASSWORD: airflow
@@ -271,6 +276,8 @@ services:
       - /dianshu/backup/data/dianshu_data/jsons:/dianshu/backup/data/dianshu_data/jsons:ro
       - ./cache:/opt/recommend/cache
       - /root/recommendation-system/models/sbert:/root/recommendation-system/models/sbert
+      # Docker socket for service restart capability（restart_if_changed 在 scheduler 里跑，必须挂在调度器上）
+      - /var/run/docker.sock:/var/run/docker.sock
     command: scheduler
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -286,6 +293,7 @@ services:
   prometheus:
     image: prom/prometheus:latest
     container_name: prometheus
+    restart: unless-stopped
     volumes:
       - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
       - prometheus-data:/prometheus
@@ -300,6 +308,7 @@ services:
   alertmanager:
     image: prom/alertmanager:latest
     container_name: alertmanager
+    restart: unless-stopped
     volumes:
       - ./monitoring/alertmanager.yml:/etc/alertmanager/alertmanager.yml
     command:
@@ -314,6 +323,7 @@ services:
   grafana:
     image: grafana/grafana:latest
     container_name: grafana
+    restart: unless-stopped
     environment:
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
       GF_USERS_ALLOW_SIGN_UP: "false"
@@ -334,6 +344,7 @@ services:
       context: ./notification_gateway
       dockerfile: Dockerfile
     container_name: notification-gateway
+    restart: unless-stopped
     <<: *default-env
     environment:
       WEIXIN_CORP_ID: ${WEIXIN_CORP_ID}
