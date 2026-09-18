@@ -20,7 +20,7 @@ PG="postgres-airflow"
 
 section() { echo; echo "================================================================"; echo "## $*"; echo "================================================================"; }
 
-cd "$REPO" 2>/dev/null || { echo "找不到 $REPO，请先 cd 到仓库目录"; exit 1; }
+cd "$REPO" 2>/dev/null || { echo "找不到 ${REPO}，请先 cd 到仓库目录"; exit 1; }
 
 section "① 容器状态与启动时间（关键：服务是否长期未重启）"
 docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}' | head -15
@@ -69,7 +69,7 @@ for base in "$REPO/airflow/logs" "/opt/airflow/logs"; do
   # 否则按字典序排序时 scheduler 开头的路径会挤掉真正的任务日志（第一次采集就踩了这个坑）。
   hits=$(docker exec "$SCHED" sh -c "find $base -path '*recommendation_pipeline*' -name '*.log' -newermt '-7 days' 2>/dev/null | grep -v '/scheduler/' | sort -r | head -5" 2>/dev/null)
   if [ -n "$hits" ]; then
-    echo "--- 日志文件（$base）---"
+    echo "--- 日志文件（${base}）---"
     echo "$hits"
     LAST=$(echo "$hits" | tail -1)
     echo

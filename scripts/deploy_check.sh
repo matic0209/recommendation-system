@@ -187,6 +187,6 @@ code=$?
 docker_code=$code
 if [ $docker_code -ne 0 ]; then
   echo
-  echo "（退出码 $docker_code）"
+  echo "（退出码 ${docker_code}）"
 fi
 exit $docker_code

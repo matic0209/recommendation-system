@@ -36,7 +36,7 @@ OUTPUT_DIR="/tmp/recommend_migration"
 
 mkdir -p "$OUTPUT_DIR"
 
-print_info "开始打包推荐系统（模式: $MODE）"
+print_info "开始打包推荐系统（模式: ${MODE}）"
 print_info "时间戳: $TIMESTAMP"
 
 case $MODE in
