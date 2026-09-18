@@ -18,7 +18,7 @@ set -uo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 IMAGE_MAIN="recommend-recommendation-api"
 API_URL="http://localhost:8090"
-EXPECT_APP_MD5="${EXPECT_APP_MD5:-65c7cf689a5f07b71cbc80b56200c475}"
+EXPECT_APP_MD5="${EXPECT_APP_MD5:-049149c80033f5f3cbab1c39c3c83457}"
 EXPECT_LIST_COUNT="${EXPECT_LIST_COUNT:-11325}"
 PAGES="${PAGES:-16307,16306,16305,16304,16346,13830,14297,15098,801,8523,20,22}"
 
@@ -136,6 +136,13 @@ for _ in $(seq 1 40); do
   sleep 5
 done
 [ "$READY" = "1" ] && ok "服务已就绪：$(curl -s -m 5 "$API_URL/health")" || { bad "/health 未就绪 → 执行 bash scripts/rollback.sh"; exit 1; }
+
+# ★ 清掉旧响应缓存：否则验收可能读到"切换前算好并缓存"的旧结果（曾因此误判）
+for pat in 'similar:*' 'recommend:*'; do
+  docker exec redis redis-cli -n 0 --scan --pattern "$pat" 2>/dev/null | tr -d '\r' \
+    | xargs -r -I{} docker exec redis redis-cli -n 0 del {} >/dev/null 2>&1
+done
+ok "已清理缓存（similar:* / recommend:*）——避免验收读到旧结果"
 
 # ---------------------------------------------------------------------------
 step "4/6 可选：重启 airflow-scheduler（让 DAG/脚本改动生效）"

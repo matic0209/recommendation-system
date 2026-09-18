@@ -126,6 +126,7 @@ dataset_tags = {1: ["a"], 2: ["b"], 9: ["c"]}
 recall = {
     "tag_to_items": {"a": {1, 2, 9}, "b": [1, 2]},
     "category_to_items": {"cat": {1, 9}},
+    "category_index": {"某公司": {1, 2, 9}},          # 企业索引（/similar 的 category 通道用它取候选）
     "price_bucket_index": {"0": [1, 2, 9]},
     "item_to_tags": {1: ["a"], 9: ["c"]},
     "item_to_categories": {"1": ["cat"], 9: ["cat"]},
@@ -154,6 +155,8 @@ check("热门榜保序保量（无 9）", bundle.popular == [1, 2, 3], str(bundl
 check("tag_to_items(set) 剔除", all(9 not in v for v in recall["tag_to_items"].values() if isinstance(v, set)))
 check("tag_to_items(list) 剔除", recall["tag_to_items"]["b"] == [1, 2])
 check("category_to_items 剔除", 9 not in recall["category_to_items"]["cat"])
+check("category_index（企业索引）剔除", 9 not in recall["category_index"]["某公司"],
+      str(recall["category_index"]))
 check("price_bucket_index 剔除", 9 not in recall["price_bucket_index"]["0"])
 check("item_to_tags 剔除", 9 not in recall["item_to_tags"])
 check("item_to_categories 剔除", 9 not in recall["item_to_categories"])

@@ -702,7 +702,9 @@ def _prune_unavailable_datasets(
         popular[:] = [dataset_id for dataset_id in popular if dataset_id not in excluded]
         removed += before - len(popular)
 
-    for name in ("tag_to_items", "category_to_items", "price_bucket_index"):
+    # 注意：category_index 是"企业/公司 → 数据集"索引，/similar 的 category 通道会用它取候选
+    # （main.py 中 category_index.get(company)），早期版本漏了它 → 已下架数据会从这条路泄漏回来。
+    for name in ("tag_to_items", "category_to_items", "category_index", "price_bucket_index"):
         index = recall_indices.get(name)
         if not isinstance(index, dict):
             continue
