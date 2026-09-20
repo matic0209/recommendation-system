@@ -21,16 +21,18 @@ SAMPLES_PATH = PROCESSED_DIR / "ranking_training_samples.parquet"
 DATASET_LABELS_PATH = PROCESSED_DIR / "ranking_labels_by_dataset.parquet"
 SLOT_LABELS_PATH = PROCESSED_DIR / "ranking_slot_metrics.parquet"
 DEFAULT_CHANNEL_WEIGHTS: Dict[str, float] = {
-    "behavior": 1.5,
-    "content": 0.8,
-    "vector": 0.5,
+    # 与 app/main.py 的 DEFAULT_CHANNEL_WEIGHTS 保持一致（仅作为曝光日志里
+    # 缺少 channel_weights 字段时的兜底值；正常应记录实际生效权重）。
+    "behavior": 1.2,
+    "content": 0.9,
+    "vector": 0.6,
     "popular": 0.05,
     "tag": 0.4,
     "category": 0.3,
     "price": 0.2,
     "usercf": 0.6,
     "image": 0.4,
-    "12cat": 0.8,  # 12类别召回 - 与vector相同权重
+    "12cat": 0.8,  # 12类别召回 - 仅用于排序特征 channel_weight
 }
 
 
@@ -225,7 +227,11 @@ def build_training_labels() -> None:
         samples["channel_weight"] = pd.Series(dtype="float64")
 
     PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
-    samples.to_parquet(SAMPLES_PATH, index=False)
+    # row_group_size：显式按 20 万行切分行组。
+    # 原因（2026-09 实测）：此前写出的文件是 3281 万行挤在 1 个 row group 里，
+    # 任何读取（pandas / pyarrow）都必须先把整个行组解压进内存，直接导致 train_models
+    # 被 OOM kill。分块写出后，读取方可以真正按行组流式处理，峰值内存大幅下降。
+    samples.to_parquet(SAMPLES_PATH, index=False, row_group_size=200_000)
     LOGGER.info("Saved ranking training samples: %s (%d rows)", SAMPLES_PATH, len(samples))
 
     if not samples.empty:

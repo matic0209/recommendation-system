@@ -1,0 +1,39 @@
+# ============================================================
+# 本地测试专用镜像（不参与生产流程，生产仍用根目录的 Dockerfile）
+#
+# 与生产 Dockerfile 的差异：
+#   1. 用 requirements.serve.txt（剔除 torch/faiss/transformers/mlflow，省 ~900MB）
+#   2. 不切成 appuser（本地要往挂载进来的 data/ 写曝光日志，root 免权限问题）
+#   3. workers=1（本地调试够用，内存占用是生产的 1/4）
+#   4. models/ 和 data/ 不打进镜像，运行时用 -v 挂载（换数据不用重新构建）
+#
+# 构建：docker build -f Dockerfile.local -t reco-local:latest .
+# ============================================================
+FROM python:3.10-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libpq5 curl libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY requirements.serve.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir -r /tmp/requirements.txt
+
+COPY app/ /app/app/
+COPY config/ /app/config/
+COPY pipeline/ /app/pipeline/
+COPY scripts/ /app/scripts/
+
+RUN mkdir -p /app/logs /app/data/processed /app/data/evaluation /app/models
+
+ENV MPLCONFIGDIR=/tmp \
+    PYTHONUNBUFFERED=1
+
+EXPOSE 8000
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD curl -f http://localhost:8000/health || exit 1
+
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]

@@ -13,7 +13,7 @@ import uuid
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from functools import partial
+from functools import lru_cache, partial
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
 from datetime import datetime, timezone
@@ -170,6 +170,36 @@ def _collect_dataset_ids(bundle: ModelBundle) -> Set[int]:
 
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _env_float(
+    name: str,
+    default: float,
+    *,
+    minimum: Optional[float] = None,
+    maximum: Optional[float] = None,
+) -> float:
+    """读取浮点型环境变量，非法值回退默认值并告警。
+
+    这样做的目的：调参写错一个环境变量时，只退化为旧行为，而不是让线上
+    每个请求都抛异常。
+    """
+    raw = os.getenv(name)
+    if raw in (None, ""):
+        value = float(default)
+    else:
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            LOGGER.warning("环境变量 %s=%r 不是合法数字，回退默认值 %s", name, raw, default)
+            value = float(default)
+    if minimum is not None:
+        value = max(value, minimum)
+    if maximum is not None:
+        value = min(value, maximum)
+    return value
+
+
 app = FastAPI(title="Dataset Recommendation API")
 
 # Set service info for Prometheus
@@ -180,13 +210,71 @@ service_info.info({
 })
 
 REQUEST_ID_HEADER = "X-Request-ID"
+
+# 融合层渠道权重：分数 = Σ(渠道内 Min-Max 归一化分 × 权重)
+# 说明：
+#   1) 该表是"兜底/默认值"，服务启动时会用 models/channel_weights.json 覆盖
+#      behavior/content/vector/popular 四项（该文件由 pipeline.train_channel_weights
+#      按真实 CTR/CVR 每天重算）。
+#   2) 覆盖结果会经过 _enforce_channel_weight_order() 处理：既限制单渠道浮动幅度，
+#      又强制保证 vector=content > behavior > popular 的业务次序不被反转。
+#   3) popular 无论权重多少，最终列表里最多占 MAX_POPULAR_SHARE（默认 25%）。
+#   4) "12cat" 不参与分数融合，仅作为排序特征 channel_weight 的取值来源，
+#      类别召回的加分系数见 DEFAULT_AUGMENT_WEIGHTS。
 DEFAULT_CHANNEL_WEIGHTS = {
-    "behavior": 1.2,  # 降低（原1.5）- 减少个性化主导，配合归一化
-    "content": 1.0,   # 提升（原0.8）- 增强内容相关性
-    "vector": 0.8,    # 提升（原0.5）- 但仍低于个性化
-    "popular": 0.02,  # 降低（原0.1）- Popular质量过滤后减少权重，减少负分影响
-    "12cat": 0.8,     # 12类别召回 - 与vector相同权重，增强类别相关性
+    # 权重次序（业务规则，2026-02 与业务方确认）：
+    #     vector(语义) = content(内容/标签)  >  behavior(行为协同)  >  popular(全局热门)
+    # _enforce_channel_weight_order() 会强制保证这个次序，即使
+    # models/channel_weights.json（每日 CTR 训练结果）给出相反的值。
+    "vector": 1.2,    # SBERT 语义向量 —— 一级
+    "content": 1.2,   # 内容/标签相似 —— 一级（与 vector 同级）
+    "behavior": 0.9,  # 行为协同 —— 二级
+    "popular": 0.05,  # 全局热门 —— 三级（仅作兜底，且最终列表有配额限制）
+    "12cat": 0.8,     # 12类别召回：仅用于排序特征 channel_weight
 }
+
+# 权重保序规则参数
+CHANNEL_WEIGHT_TIERS = (("vector", "content"), ("behavior",), ("popular",))
+CHANNEL_WEIGHT_OVERRIDE_BAND = _env_float("CHANNEL_WEIGHT_OVERRIDE_BAND", 0.4, minimum=0.0, maximum=1.0)
+CHANNEL_WEIGHT_MIN_GAP = _env_float("CHANNEL_WEIGHT_MIN_GAP", 0.15, minimum=0.0, maximum=0.9)
+
+# 最终推荐列表的配额（解决"某类热销商品刷屏"和"热门渠道占比过高"）
+# 12 条推荐时：popular 来源最多 3 条，非目标行业的单一类别最多 3 条
+MAX_POPULAR_SHARE = _env_float("MAX_POPULAR_SHARE", 0.25, minimum=0.0, maximum=1.0)
+MAX_OTHER_CATEGORY_SHARE = _env_float("MAX_OTHER_CATEGORY_SHARE", 0.25, minimum=0.0, maximum=1.0)
+
+# 辅助渠道加分系数（绝对分量纲，与上面"归一化×权重"不是同一套刻度）
+# 可通过 config/experiments.yaml 覆盖，写法为 augment_<渠道>_weight，例如：
+#   parameters: {augment_12cat_weight: 0.8}
+# 注意：models/channel_weights.json 不会包含 augment_ 前缀的键，因此这里的系数
+# 不会被 CTR 训练结果意外覆盖。
+DEFAULT_AUGMENT_WEIGHTS = {
+    "tag": 0.4,      # 标签重叠召回
+    "12cat": 0.6,    # 12类别召回（原硬编码 0.5，小幅加强类别相关性）
+    "category": 0.3,  # 同公司/同来源（遗留渠道）
+    "price": 0.2,    # 价格分桶召回（原硬编码 0.25）
+    "usercf": 0.6,   # 相似用户召回
+}
+
+# 行业类别词表：与 pipeline/enhance_tags.py 的 13 个类别保持一致，
+# 并保留历史短名（金融/科技/农业 等）以兼容更早的标签数据。
+# 用于排序特征 same_top_category（"目标与候选是否同属一个行业类别"）。
+TOP_CATEGORY_TOKENS = frozenset([
+    # 当前 13 个类别（enhance_tags.py TOP_CATEGORIES）
+    "政府政务", "金融财经", "医疗健康", "交通物流", "教育科研", "工业制造",
+    "商业零售", "能源环保", "文化娱乐", "农业农村", "互联网科技", "社会民生",
+    "数字产品",
+    # 历史短名（旧标签里可能出现）
+    "金融", "交通运输", "教育培训", "农业", "科技",
+])
+
+# 类别配额里"未分类 / 仅属于目标自身类别"候选使用的计数桶名
+UNCATEGORIZED_BUCKET = "__uncategorized__"
+
+# 探索率（epsilon-greedy）：默认 0.10（原硬编码 0.15），
+# 15% 的随机替换对点击率的负向影响大于其发现价值
+EXPLORATION_EPSILON = _env_float("EXPLORATION_EPSILON", 0.10, minimum=0.0, maximum=0.5)
+
 
 
 class HotUserData:
@@ -359,6 +447,10 @@ def _compute_mmr_lambda(*, endpoint: str, request_context: Optional[Dict[str, st
     Lambda=0.5 means 50% relevance, 50% diversity (balanced).
     Lower lambda = more diversity, higher lambda = more relevance.
 
+    可通过环境变量调整基准值（默认值保持不变）：
+      MMR_LAMBDA         recommend_detail 基准值，默认 0.5
+      MMR_LAMBDA_SIMILAR similar 接口基准值，默认 0.4
+
     Args:
         endpoint: Recommendation endpoint
         request_context: Request context with source, device_type, etc.
@@ -366,8 +458,11 @@ def _compute_mmr_lambda(*, endpoint: str, request_context: Optional[Dict[str, st
     Returns:
         Lambda value in [0.2, 0.6] range
     """
-    # 降低base从0.7到0.5，提升多样性权重
-    base = 0.5 if endpoint == "recommend_detail" else 0.4
+    # 基准值：detail 偏相关性（0.5），similar 偏多样性（0.4）
+    if endpoint == "recommend_detail":
+        base = _env_float("MMR_LAMBDA", 0.5, minimum=0.1, maximum=0.9)
+    else:
+        base = _env_float("MMR_LAMBDA_SIMILAR", 0.4, minimum=0.1, maximum=0.9)
     context = request_context or {}
     source = context.get("source")
 
@@ -442,6 +537,233 @@ def _load_channel_weight_overrides() -> Dict[str, float]:
     return normalized
 
 
+def _enforce_channel_weight_order(weights: Dict[str, float]) -> Dict[str, float]:
+    """把渠道权重约束到业务规则：vector = content > behavior > popular。
+
+    两步处理（都可调）：
+      1) 限幅：每个渠道夹在默认值的 [1-band, 1+band] 内（默认 ±40%），
+         防止每日 CTR 训练结果把某渠道压到接近 0 或抬到失真；
+      2) 保序：上层渠道至少比下层高 gap（默认 15%），
+         vector/content 视为同一层，取较低者作为该层的上限基准。
+
+    这样即使 models/channel_weights.json 出现"popular 比 content 还高"这种
+    与业务预期相反的结果，线上次序也不会被反转。
+
+    Args:
+        weights: 已应用覆盖值的权重表
+
+    Returns:
+        修正后的权重表（同时在日志里记录被修正的渠道）
+    """
+    adjusted = {key: max(float(value), 0.0) for key, value in weights.items()}
+    corrections: Dict[str, Tuple[float, float]] = {}
+
+    band = max(CHANNEL_WEIGHT_OVERRIDE_BAND, 0.0)
+    for channel, default in DEFAULT_CHANNEL_WEIGHTS.items():
+        if channel not in adjusted or channel == "12cat":
+            continue
+        lower = default * (1 - band)
+        upper = default * (1 + band)
+        value = adjusted[channel]
+        clamped = min(max(value, lower), upper)
+        if abs(clamped - value) > 1e-9:
+            corrections[channel] = (value, clamped)
+            adjusted[channel] = clamped
+
+    gap = min(max(CHANNEL_WEIGHT_MIN_GAP, 0.0), 0.9)
+    for index in range(1, len(CHANNEL_WEIGHT_TIERS)):
+        upper_tier = CHANNEL_WEIGHT_TIERS[index - 1]
+        current_tier = CHANNEL_WEIGHT_TIERS[index]
+        upper_ceiling = min(adjusted.get(name, 0.0) for name in upper_tier)
+        ceiling = upper_ceiling / (1 + gap)
+        for name in current_tier:
+            if name not in adjusted:
+                continue
+            if adjusted[name] > ceiling:
+                corrections[name] = (adjusted[name], ceiling)
+                adjusted[name] = max(ceiling, 0.0)
+
+    if corrections:
+        LOGGER.info(
+            "Channel weight order enforced (vector=content>behavior>popular): %s",
+            ", ".join(f"{name}: {old:.4f}->{new:.4f}" for name, (old, new) in corrections.items()),
+        )
+    return adjusted
+
+
+def _load_excluded_dataset_ids() -> Set[int]:
+    """加载"不可售/已下架"数据集黑名单。
+
+    来源（可同时使用）：
+      1) 环境变量 RECO_EXCLUDED_DATASET_IDS="123,456"；
+      2) models/excluded_dataset_ids.json，内容为 [123, 456] 或 {"ids": [123, 456]}。
+
+    背景：业务库的状态字段（is_delete / publish_status / status）**从未同步**到推荐
+    系统——特征表与 models 文件里都没有状态列，所以推荐链路此前没有任何状态过滤。
+    实测证据：数据集 15769 的线上页面显示"该数据已删除"，业务库最新状态为
+    publish_status=0，但它仍留在推荐候选池里（全站共 22 个这类 id）。
+
+    这里提供一条不依赖 ETL 改动的兜底通道；名单可直接用
+    scripts/export_excluded_ids.py 从业务库增量导出目录（/dianshu/backup/.../jsons）
+    自动生成。根治办法是让特征表带上在售标记（见 docs/推荐系统问题总结与修复方案.md）。
+    """
+    excluded: Set[int] = set()
+
+    raw = os.getenv("RECO_EXCLUDED_DATASET_IDS", "") or ""
+    for token in raw.replace(";", ",").replace(" ", ",").split(","):
+        token = token.strip()
+        if not token:
+            continue
+        try:
+            excluded.add(int(token))
+        except (TypeError, ValueError):
+            LOGGER.warning("RECO_EXCLUDED_DATASET_IDS 含非法项 %r，已忽略", token)
+
+    path = MODELS_DIR / "excluded_dataset_ids.json"
+    if path.exists():
+        try:
+            payload = json.loads(path.read_text())
+            if isinstance(payload, dict):
+                payload = payload.get("ids") or []
+            for item in payload or []:
+                try:
+                    excluded.add(int(item))
+                except (TypeError, ValueError):
+                    continue
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("解析排除名单 %s 失败: %s", path, exc)
+    return excluded
+
+
+def _prune_unavailable_datasets(
+    *,
+    bundle: ModelBundle,
+    recall_indices: Dict[str, Any],
+    metadata: Dict[int, Dict[str, Optional[str]]],
+    dataset_tags: Dict[int, List[str]],
+    excluded: Set[int],
+) -> int:
+    """把不可售/已下架数据集从内存索引中剔除（就地修改，保持引用一致）。
+
+    覆盖：元数据、标签、行为/内容/向量/热门召回表、12cat 类别索引、
+    标签倒排、价格分桶、item_to_tags。剔除后这些 ID 既不会被召回，
+    也不会进入探索池（探索池取自 metadata.keys()）。
+    """
+    if not excluded:
+        return 0
+    removed = 0
+
+    for mapping in (metadata, dataset_tags):
+        for dataset_id in list(mapping.keys()):
+            if dataset_id in excluded:
+                mapping.pop(dataset_id, None)
+                removed += 1
+
+    for attr in ("behavior", "content"):
+        neighbors_map = getattr(bundle, attr, None)
+        if not isinstance(neighbors_map, dict):
+            continue
+        for source_id in list(neighbors_map.keys()):
+            if source_id in excluded:
+                neighbors_map.pop(source_id, None)
+                removed += 1
+                continue
+            neighbors = neighbors_map[source_id]
+            if isinstance(neighbors, dict):
+                neighbors_map[source_id] = {
+                    key: value for key, value in neighbors.items() if key not in excluded
+                }
+                removed += len(neighbors) - len(neighbors_map[source_id])
+
+    vector_map = getattr(bundle, "vector", None)
+    if isinstance(vector_map, dict):
+        for source_id in list(vector_map.keys()):
+            if source_id in excluded:
+                vector_map.pop(source_id, None)
+                removed += 1
+                continue
+            entries = vector_map[source_id]
+            if isinstance(entries, list):
+                kept = []
+                for entry in entries:
+                    try:
+                        entry_id = int(entry.get("dataset_id", 0) or 0)
+                    except (AttributeError, TypeError, ValueError):
+                        kept.append(entry)          # 结构异常时保守保留，不能让启动失败
+                        continue
+                    if entry_id not in excluded:
+                        kept.append(entry)
+                removed += len(entries) - len(kept)
+                vector_map[source_id] = kept
+
+    popular = getattr(bundle, "popular", None)
+    if isinstance(popular, list):
+        before = len(popular)
+        popular[:] = [dataset_id for dataset_id in popular if dataset_id not in excluded]
+        removed += before - len(popular)
+
+    # 注意：category_index 是"企业/公司 → 数据集"索引，/similar 的 category 通道会用它取候选
+    # （main.py 中 category_index.get(company)），早期版本漏了它 → 已下架数据会从这条路泄漏回来。
+    for name in ("tag_to_items", "category_to_items", "category_index", "price_bucket_index"):
+        index = recall_indices.get(name)
+        if not isinstance(index, dict):
+            continue
+        for key, value in list(index.items()):
+            if isinstance(value, set):
+                index[key] = {item for item in value if item not in excluded}
+            elif isinstance(value, list):
+                index[key] = [item for item in value if item not in excluded]
+
+    # 注意：这里必须把字符串形式的排除集在循环外算好。
+    # 早期版本写成 `str(dataset_id) in {str(item) for item in excluded}`，
+    # 会在每个索引键上重建一次集合（5000 键 × 11000 排除 id ≈ 5500 万次字符串转换），
+    # 让启动多花几十秒 —— 已修正。
+    excluded_str = {str(item) for item in excluded}
+    for name in ("item_to_tags", "item_to_categories"):
+        index = recall_indices.get(name)
+        if isinstance(index, dict):
+            for dataset_id in list(index.keys()):
+                if dataset_id in excluded or str(dataset_id) in excluded_str:
+                    index.pop(dataset_id, None)
+
+    user_similarity = recall_indices.get("user_similarity")
+    if isinstance(user_similarity, dict):
+        for user_id, entries in list(user_similarity.items()):
+            if not isinstance(entries, list):
+                continue
+            kept_entries = []
+            for entry in entries:
+                if not isinstance(entry, (list, tuple)) or not entry:
+                    kept_entries.append(entry)
+                    continue
+                try:
+                    if int(entry[0]) in excluded:
+                        continue
+                except (TypeError, ValueError):
+                    kept_entries.append(entry)   # 结构异常时保守保留
+                    continue
+                kept_entries.append(entry)
+            user_similarity[user_id] = kept_entries
+    return removed
+
+
+def _drop_excluded_from_scores(
+    scores: Dict[int, float],
+    reasons: Dict[int, str],
+    excluded: Set[int],
+) -> int:
+    """请求内兜底：把不可售/已下架的候选从候选集中剔除（防止命中陈旧索引）。"""
+    if not excluded or not scores:
+        return 0
+    dropped = 0
+    for dataset_id in list(scores.keys()):
+        if dataset_id in excluded:
+            scores.pop(dataset_id, None)
+            reasons.pop(dataset_id, None)
+            dropped += 1
+    return dropped
+
+
 def _get_channel_weight_baseline(state) -> Dict[str, float]:
     overrides = getattr(state, "channel_weights", None)
     weights = DEFAULT_CHANNEL_WEIGHTS.copy()
@@ -451,7 +773,7 @@ def _get_channel_weight_baseline(state) -> Dict[str, float]:
                 weights[channel] = float(value)
             except (TypeError, ValueError):
                 continue
-    return weights
+    return _enforce_channel_weight_order(weights)
 
 
 def _get_user_data_manager(state) -> Optional[HotUserData]:
@@ -1268,6 +1590,130 @@ def _apply_exploration(
     return exploit_ids + explore_ids
 
 
+def _apply_list_quotas(
+    ranked_ids: List[int],
+    reasons: Dict[int, str],
+    *,
+    limit: int,
+    target_dataset_id: Optional[int] = None,
+    item_to_categories: Optional[Dict[Any, Any]] = None,
+    max_popular_share: float = MAX_POPULAR_SHARE,
+    max_other_category_share: float = MAX_OTHER_CATEGORY_SHARE,
+) -> List[int]:
+    """对最终推荐列表施加"来源渠道 + 行业类别"配额。
+
+    背景（实测）：平台上的低价热销商品（例如鼠标指针皮肤）长期占据热门榜前列，
+    在"看了又看"里会造成与当前数据集完全无关的商品刷屏——实测 12 条里 8~10 条
+    都是鼠标指针，同一批商品出现在两个毫不相关的数据集页面上。业务规则：
+      1) popular（全局热门）来源最多占 limit × max_popular_share（12 条 → 3 条）；
+      2) 除"目标数据集自身所属行业"之外的单一行业类别，最多占
+         limit × max_other_category_share（12 条 → 3 条）；目标自身行业不受限
+         （例如鼠标指针详情页返回多个鼠标指针是合理的）；
+      3) 没有类别的候选按"未分类"单独计数，避免未分类商品刷屏；
+      4) 为保证返回条数不减少，被配额挡下的候选会在末尾按原顺序补齐。
+
+    Args:
+        ranked_ids: 已按 MMR/分数排好序的候选 ID（建议长度 > limit，便于补位）
+        reasons: 数据集 ID → 召回来源（用于识别 popular 渠道）
+        limit: 最终需要返回的条数
+        target_dataset_id: 当前页面数据集 ID（其所属行业豁免类别配额）
+        item_to_categories: 数据集 → 行业类别列表
+        max_popular_share: popular 渠道占比上限
+        max_other_category_share: 非目标行业单一类别占比上限
+
+    Returns:
+        选中的数据集 ID 列表（长度尽量为 limit）
+    """
+    if limit <= 0 or not ranked_ids:
+        return ranked_ids[: max(limit, 0)]
+
+    max_popular = max(1, int(limit * max(0.0, min(max_popular_share, 1.0)) + 0.5))
+    max_other_category = max(1, int(limit * max(0.0, min(max_other_category_share, 1.0)) + 0.5))
+
+    target_categories: Set[str] = set()
+    if item_to_categories and target_dataset_id is not None:
+        target_categories = _as_category_set(
+            item_to_categories.get(target_dataset_id, item_to_categories.get(str(target_dataset_id)))
+        )
+
+    selected: List[int] = []
+    blocked: List[int] = []
+    popular_count = 0
+    category_counts: Dict[str, int] = {}
+
+    for dataset_id in ranked_ids:
+        if len(selected) >= limit:
+            break
+
+        channel = _extract_channel_from_reason(reasons.get(dataset_id))
+        is_popular = channel in {"popular", "fallback"}
+
+        candidate_categories: Set[str] = set()
+        if item_to_categories:
+            candidate_categories = _as_category_set(item_to_categories.get(dataset_id))
+        if candidate_categories and target_categories and (candidate_categories & target_categories):
+            # 命中"目标自身行业"：豁免类别配额（例如鼠标指针详情页返回多个鼠标指针是合理的）
+            bucket_categories: Set[str] = set()
+        elif candidate_categories:
+            bucket_categories = candidate_categories - target_categories
+        else:
+            # 完全没有类别信息：单独用"未分类"桶计数，避免未分类商品刷屏
+            bucket_categories = {UNCATEGORIZED_BUCKET}
+
+        if is_popular and popular_count >= max_popular:
+            blocked.append(dataset_id)
+            continue
+        if bucket_categories and any(
+            category_counts.get(name, 0) >= max_other_category for name in bucket_categories
+        ):
+            blocked.append(dataset_id)
+            continue
+
+        selected.append(dataset_id)
+        if is_popular:
+            popular_count += 1
+        for name in bucket_categories:
+            category_counts[name] = category_counts.get(name, 0) + 1
+
+    if len(selected) < limit and blocked:
+        need = limit - len(selected)
+        # 放行顺序：先放行"非热门来源"（内容/语义/标签/价格/行为等），热门来源排到最后。
+        # 原因（实测）：若直接按原排名顺序放行，凑够条数的往往正是排名靠前的低价热销品，
+        # 会把刚被配额挡下的鼠标指针类商品又填回列表，使 popular 上限形同虚设
+        # （实测 12 条里出现 4 条 popular，超过 max_popular=3）。
+        non_popular_blocked = [
+            dataset_id
+            for dataset_id in blocked
+            if _extract_channel_from_reason(reasons.get(dataset_id)) not in {"popular", "fallback"}
+        ]
+        non_popular_set = set(non_popular_blocked)
+        popular_blocked = [dataset_id for dataset_id in blocked if dataset_id not in non_popular_set]
+        relaxed = (non_popular_blocked + popular_blocked)[:need]
+        selected.extend(relaxed)
+        LOGGER.info(
+            "List quota relaxed: 候选不足，放行 %d 条以保持 limit=%d（其中非热门来源 %d 条）",
+            len(relaxed),
+            limit,
+            sum(1 for dataset_id in relaxed if dataset_id in non_popular_set),
+        )
+    if blocked:
+        LOGGER.info(
+            "List quota applied (limit=%d, max_popular=%d, max_other_category=%d): "
+            "blocked=%d, selected=%d, popular_in_result=%d",
+            limit,
+            max_popular,
+            max_other_category,
+            len(blocked),
+            len(selected),
+            sum(
+                1
+                for dataset_id in selected
+                if _extract_channel_from_reason(reasons.get(dataset_id)) in {"popular", "fallback"}
+            ),
+        )
+    return selected
+
+
 def _build_response_items(
     candidate_scores: Dict[int, float],
     reasons: Dict[int, str],
@@ -1280,6 +1726,10 @@ def _build_response_items(
     exploration_epsilon: float = 0.1,
     all_dataset_ids: Optional[Set[int]] = None,
     ranking_scores: Optional[Dict[int, float]] = None,
+    target_dataset_id: Optional[int] = None,
+    item_to_categories: Optional[Dict[Any, Any]] = None,
+    max_popular_share: float = MAX_POPULAR_SHARE,
+    max_other_category_share: float = MAX_OTHER_CATEGORY_SHARE,
 ) -> List[RecommendationItem]:
     """
     Build response items with optional MMR reranking and exploration.
@@ -1296,6 +1746,10 @@ def _build_response_items(
         exploration_epsilon: Exploration rate (0.0-1.0)
         all_dataset_ids: All available dataset IDs for exploration pool
         ranking_scores: Optional ranking model scores for display (used instead of candidate_scores)
+        target_dataset_id: 当前页面数据集 ID（用于列表配额，判定"目标自身行业"）
+        item_to_categories: 数据集 → 行业类别列表（用于列表配额）
+        max_popular_share: popular 来源占比上限（默认 25%，12 条 → 3 条）
+        max_other_category_share: 非目标行业单一类别占比上限（默认 25%）
 
     Returns:
         List of recommendation items
@@ -1303,20 +1757,34 @@ def _build_response_items(
     if not candidate_scores:
         return []
 
+    # 先取出比 limit 更多的候选（供列表配额补位使用）
+    pool_limit = max(limit, limit * 3)
+
     # Apply MMR reranking if enabled and tags available
     if apply_mmr and dataset_tags:
         ranked_ids = _apply_mmr_reranking(
             candidate_scores,
             dataset_tags,
             lambda_param=mmr_lambda,
-            limit=limit,
+            limit=pool_limit,
         )
     else:
         # Fallback to score-based ranking
         ranked_ids = [
             dataset_id for dataset_id, _ in
             sorted(candidate_scores.items(), key=lambda kv: kv[1], reverse=True)
-        ][:limit]
+        ][:pool_limit]
+
+    # 业务配额：限制 popular 渠道占比，以及"非目标行业"的单一类别占比
+    ranked_ids = _apply_list_quotas(
+        ranked_ids,
+        reasons,
+        limit=limit,
+        target_dataset_id=target_dataset_id,
+        item_to_categories=item_to_categories,
+        max_popular_share=max_popular_share,
+        max_other_category_share=max_other_category_share,
+    )
 
     # Apply exploration if enabled
     if apply_exploration and all_dataset_ids:
@@ -1496,6 +1964,24 @@ def _serve_fallback(
     return items, reasons, reason_label
 
 
+def _augment_weight(name: str, weights: Optional[Dict[str, float]] = None) -> float:
+    """读取辅助渠道的加分系数。
+
+    优先取 weights 里的 "augment_<渠道>"（可由 config/experiments.yaml 的
+    augment_<渠道>_weight 参数注入），否则回退 DEFAULT_AUGMENT_WEIGHTS。
+    单独的 augment_ 前缀可以避免被 models/channel_weights.json（CTR 训练结果）
+    意外覆盖——两者的量纲本来就不同。
+    """
+    if weights:
+        override = weights.get(f"augment_{name}")
+        if override is not None:
+            try:
+                return float(override)
+            except (TypeError, ValueError):
+                LOGGER.warning("辅助渠道系数 augment_%s=%r 非法，使用默认值", name, override)
+    return float(DEFAULT_AUGMENT_WEIGHTS.get(name, 0.0))
+
+
 def _augment_with_multi_channel(
     state,
     *,
@@ -1504,6 +1990,7 @@ def _augment_with_multi_channel(
     reasons: Dict[int, str],
     limit: int,
     user_id: Optional[int] = None,
+    weights: Optional[Dict[str, float]] = None,
 ) -> None:
     recall = getattr(state, "recall_indices", None)
     if not recall:
@@ -1542,7 +2029,7 @@ def _augment_with_multi_channel(
         if candidate_scores:
             normalized_tag_scores = _normalize_channel_scores(candidate_scores)
             for dataset_id, norm_score in sorted(normalized_tag_scores.items(), key=lambda x: x[1], reverse=True)[: limit * 2]:
-                _bump(int(dataset_id), norm_score * 0.4, "tag")
+                _bump(int(dataset_id), norm_score * _augment_weight("tag", weights), "tag")
 
     # 12-category recall (standard categories from zero-shot classification)
     item_to_categories = recall.get("item_to_categories", {})
@@ -1564,7 +2051,7 @@ def _augment_with_multi_channel(
         if category_candidate_scores:
             normalized_cat_scores = _normalize_channel_scores(category_candidate_scores)
             for dataset_id, norm_score in sorted(normalized_cat_scores.items(), key=lambda x: x[1], reverse=True)[: limit * 2]:
-                _bump(int(dataset_id), norm_score * 0.5, "12cat")  # Higher weight for 12-category match
+                _bump(int(dataset_id), norm_score * _augment_weight("12cat", weights), "12cat")
 
     # Company category recall (legacy)
     category_index = recall.get("category_index", {})
@@ -1574,7 +2061,7 @@ def _augment_with_multi_channel(
         for dataset_id in list(candidates)[: limit * 2]:
             if dataset_id == target_id:
                 continue
-            _bump(int(dataset_id), 0.3, "category")
+            _bump(int(dataset_id), _augment_weight("category", weights), "category")
 
     # Price bucket recall
     price_bucket_index = recall.get("price_bucket_index", {})
@@ -1596,7 +2083,7 @@ def _augment_with_multi_channel(
             bucket = "4"
         candidates = price_bucket_index.get(bucket) or price_bucket_index.get(int(bucket)) or set()
         for dataset_id in list(candidates)[: limit * 2]:
-            _bump(int(dataset_id), 0.25, "price")
+            _bump(int(dataset_id), _augment_weight("price", weights), "price")
 
     # UserCF recall
     if user_id:
@@ -1613,7 +2100,7 @@ def _augment_with_multi_channel(
                         continue
                     candidate_scores[dataset] = candidate_scores.get(dataset, 0.0) + float(similarity)
             for dataset_id, score in sorted(candidate_scores.items(), key=lambda x: x[1], reverse=True)[: limit * 2]:
-                _bump(int(dataset_id), float(score) * 0.6, "usercf")
+                _bump(int(dataset_id), float(score) * _augment_weight("usercf", weights), "usercf")
 
 
 def _combine_scores(
@@ -1817,13 +2304,30 @@ def _compute_dynamic_channel_weights(
     adjusted = {key: max(float(value), 0.0) for key, value in base_weights.items()}
 
     def _shift(source: str, targets: List[str], fraction: float) -> None:
+        """把 source 渠道的一部分权重转移给 targets。
+
+        转移量按各 target 当前权重的占比分配，而不是等额均分：
+        等额均分会让本来权重极低的渠道白捡一个绝对量（历史上 popular 会因此
+        从配置的 0.02 被抬到 0.22），导致实际生效权重与配置表严重不符。
+        占比为 0 的目标渠道不参与分配，权重不会凭空消失。
+        """
         current = adjusted.get(source, 0.0)
         if current <= 0 or not targets or fraction <= 0:
             return
         amount = current * min(fraction, 1.0)
         adjusted[source] = max(current - amount, 0.0)
-        share = amount / len(targets)
-        for target in targets:
+
+        weighted_targets = [t for t in targets if adjusted.get(t, 0.0) > 0]
+        total = sum(adjusted[t] for t in weighted_targets)
+        if not weighted_targets or total <= 0:
+            # 目标渠道权重全为 0：退化为等额分配，避免这部分权重无处可去
+            share = amount / len(targets)
+            for target in targets:
+                adjusted[target] = max(adjusted.get(target, 0.0) + share, 0.0)
+            return
+
+        for target in weighted_targets:
+            share = amount * adjusted[target] / total
             adjusted[target] = max(adjusted.get(target, 0.0) + share, 0.0)
 
     def _boost(target: str, amount: float) -> None:
@@ -1995,6 +2499,141 @@ def _ensure_dataset_index(frame: pd.DataFrame) -> pd.DataFrame:
     return frame
 
 
+def _as_category_set(value: Any) -> Set[str]:
+    """把 item_to_categories.json 的取值统一成类别集合（兼容 list/tuple/set/字符串）。"""
+    if value is None:
+        return set()
+    if isinstance(value, str):
+        return {token.strip() for token in value.replace(";", ",").split(",") if token.strip()}
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return {str(token).strip() for token in value if str(token).strip()}
+    return set()
+
+
+@lru_cache(maxsize=8192)
+def _split_tags_cached(raw_text: str) -> Tuple[str, ...]:
+    """标签串 → 小写标签元组（带缓存）。
+
+    候选之间大量重复标签串，缓存可以避免在每次请求里反复 split；
+    缓存只按原始字符串做键，命中率高、无副作用。
+    """
+    return tuple(_parse_tags(raw_text))
+
+
+def _tag_set(value: Any) -> Set[str]:
+    """把分号分隔的标签串解析成小写集合。
+
+    口径与训练侧 pipeline/train_models.py 的 _parse_tags 保持一致：
+    None / NaN / 空串一律视为"无标签"，避免把 NaN 解析成字符串 "nan"
+    造成两个都没有标签的数据集被误判为"标签相同"。
+    """
+    if value is None:
+        return set()
+    if not isinstance(value, str):
+        try:
+            if pd.isna(value):
+                return set()
+        except (TypeError, ValueError):
+            pass
+        value = str(value)
+    return set(_split_tags_cached(value))
+
+
+def _compute_relevance_features(
+    dataset_ids: List[int],
+    raw_indexed: pd.DataFrame,
+    target_dataset_id: Optional[int],
+    item_to_categories: Optional[Dict[Any, Any]] = None,
+) -> pd.DataFrame:
+    """计算"目标数据集 ↔ 候选数据集"之间的相关度特征。
+
+    产出 5 列（与 pipeline/train_models.py 训练时使用的特征同名同口径）：
+      tag_overlap_count        标签交集个数
+      tag_jaccard_similarity   标签 Jaccard 相似度
+      same_top_category        是否同属一个行业类别（0/1）
+      category_overlap         13 类行业类别交集个数
+      category_match           是否有共同的行业类别（0/1）
+
+    这些特征依赖"当前请求的目标数据集"，因此必须在每次请求时按目标重算。
+    历史上只有启动阶段算过一次（target 为 None，全部填 0），导致排序模型训练
+    时见过的类别/标签相关度信号在推理阶段恒为 0（训练/推理不一致）。
+
+    Args:
+        dataset_ids: 候选数据集 ID 列表
+        raw_indexed: 以 dataset_id 为索引的原始特征（需包含 tag 列）
+        target_dataset_id: 目标（当前页面）数据集 ID，None 表示无目标上下文
+        item_to_categories: 数据集 → 行业类别列表（来自 models/item_to_categories.json）
+
+    Returns:
+        DataFrame，index 为 dataset_ids，列为上述 5 个特征
+    """
+    columns = [
+        "tag_overlap_count",
+        "tag_jaccard_similarity",
+        "same_top_category",
+        "category_overlap",
+        "category_match",
+    ]
+    if not dataset_ids:
+        return pd.DataFrame(columns=columns)
+    frame = pd.DataFrame(0.0, index=pd.Index(dataset_ids, name="dataset_id"), columns=columns)
+
+    indexed = _ensure_dataset_index(raw_indexed)
+    tag_lookup: Dict[int, Any] = {}
+    if not indexed.empty and "tag" in indexed.columns:
+        tag_lookup = indexed["tag"].to_dict()
+
+    target_tags: Set[str] = set()
+    if target_dataset_id is not None:
+        target_tags = _tag_set(tag_lookup.get(target_dataset_id, ""))
+    target_top_categories = target_tags & TOP_CATEGORY_TOKENS
+
+    target_categories: Set[str] = set()
+    if item_to_categories and target_dataset_id is not None:
+        target_categories = _as_category_set(
+            item_to_categories.get(target_dataset_id, item_to_categories.get(str(target_dataset_id)))
+        )
+
+    tag_overlap_count: List[float] = []
+    tag_jaccard: List[float] = []
+    same_top_category: List[float] = []
+    category_overlap: List[float] = []
+    category_match: List[float] = []
+
+    for dataset_id in dataset_ids:
+        candidate_tags = _tag_set(tag_lookup.get(dataset_id, ""))
+        if target_tags and candidate_tags:
+            intersection = len(target_tags & candidate_tags)
+            union = len(target_tags | candidate_tags)
+            tag_overlap_count.append(float(intersection))
+            tag_jaccard.append(float(intersection) / union if union > 0 else 0.0)
+        else:
+            tag_overlap_count.append(0.0)
+            tag_jaccard.append(0.0)
+
+        same_top_category.append(
+            1.0 if (target_top_categories & (candidate_tags & TOP_CATEGORY_TOKENS)) else 0.0
+        )
+
+        if item_to_categories:
+            candidate_categories = _as_category_set(
+                item_to_categories.get(dataset_id, item_to_categories.get(str(dataset_id)))
+            )
+            overlap = len(target_categories & candidate_categories)
+            category_overlap.append(float(overlap))
+            category_match.append(1.0 if overlap > 0 else 0.0)
+        else:
+            category_overlap.append(0.0)
+            category_match.append(0.0)
+
+    frame["tag_overlap_count"] = tag_overlap_count
+    frame["tag_jaccard_similarity"] = tag_jaccard
+    frame["same_top_category"] = same_top_category
+    frame["category_overlap"] = category_overlap
+    frame["category_match"] = category_match
+    return frame
+
+
 def _build_static_ranking_features(
     dataset_ids: List[int],
     raw_features: pd.DataFrame,
@@ -2003,11 +2642,13 @@ def _build_static_ranking_features(
     feature_overrides: Optional[pd.DataFrame] = None,
     stats_overrides: Optional[pd.DataFrame] = None,
     target_dataset_id: Optional[int] = None,
+    item_to_categories: Optional[Dict[Any, Any]] = None,
 ) -> pd.DataFrame:
     """Compute dataset-level static ranking features.
 
     Args:
         target_dataset_id: The target/page dataset ID for computing category relevance features.
+        item_to_categories: 数据集 → 行业类别列表，用于 category_overlap / category_match 特征。
     """
     if not dataset_ids:
         return pd.DataFrame()
@@ -2113,52 +2754,19 @@ def _build_static_ranking_features(
     for col in pca_columns:
         features[col] = pd.to_numeric(selected[col], errors="coerce").fillna(0.0)
 
-    # === Category Relevance Features ===
-    # Compute tag-based similarity features between target and candidates
-    TOP_CATEGORIES = frozenset([
-        "金融", "医疗健康", "政府政务", "交通运输",
-        "教育培训", "能源环保", "农业", "科技",
-        "商业零售", "文化娱乐", "社会民生",
-    ])
-
-    if target_dataset_id is not None and target_dataset_id in raw_indexed.index:
-        target_row = raw_indexed.loc[target_dataset_id]
-        target_tags_str = target_row.get("tag", "")
-        target_tags = set(
-            t.strip().lower() for t in str(target_tags_str).split(";") if t.strip()
-        ) if target_tags_str else set()
-
-        def calc_tag_overlap(candidate_tags_str) -> float:
-            candidate_tags = set(
-                t.strip().lower() for t in str(candidate_tags_str).split(";") if t.strip()
-            ) if candidate_tags_str else set()
-            return float(len(target_tags & candidate_tags))
-
-        def calc_tag_jaccard(candidate_tags_str) -> float:
-            candidate_tags = set(
-                t.strip().lower() for t in str(candidate_tags_str).split(";") if t.strip()
-            ) if candidate_tags_str else set()
-            if not target_tags or not candidate_tags:
-                return 0.0
-            union = len(target_tags | candidate_tags)
-            return float(len(target_tags & candidate_tags)) / union if union > 0 else 0.0
-
-        def calc_same_top_category(candidate_tags_str) -> float:
-            candidate_tags = set(
-                t.strip().lower() for t in str(candidate_tags_str).split(";") if t.strip()
-            ) if candidate_tags_str else set()
-            target_cats = target_tags & TOP_CATEGORIES
-            candidate_cats = candidate_tags & TOP_CATEGORIES
-            return 1.0 if len(target_cats & candidate_cats) > 0 else 0.0
-
-        features["tag_overlap_count"] = selected["tag"].apply(calc_tag_overlap)
-        features["tag_jaccard_similarity"] = selected["tag"].apply(calc_tag_jaccard)
-        features["same_top_category"] = selected["tag"].apply(calc_same_top_category)
-    else:
-        # No target context - fill with defaults
-        features["tag_overlap_count"] = 0.0
-        features["tag_jaccard_similarity"] = 0.0
-        features["same_top_category"] = 0.0
+    # === 相关度特征（标签重叠 + 行业类别重叠）===
+    # 由 _compute_relevance_features 统一计算：这里只在"启动预计算/补齐缺失数据集"
+    # 时算一次（无目标数据集时全为 0），请求内的实际取值由
+    # _compute_ranking_features 按当前目标数据集重算。
+    relevance = _compute_relevance_features(
+        list(features.index),
+        raw_indexed,
+        target_dataset_id,
+        item_to_categories,
+    )
+    if not relevance.empty:
+        for column in relevance.columns:
+            features[column] = relevance[column].reindex(features.index).fillna(0.0).astype(float)
 
     return features
 
@@ -2183,6 +2791,7 @@ def _compute_ranking_features(
     dataset_stats_indexed: Optional[pd.DataFrame] = None,
     slot_metrics_indexed: Optional[pd.DataFrame] = None,
     target_dataset_id: Optional[int] = None,
+    item_to_categories: Optional[Dict[Any, Any]] = None,
 ) -> pd.DataFrame:
     if not dataset_ids:
         return pd.DataFrame()
@@ -2209,6 +2818,7 @@ def _compute_ranking_features(
                 indexed_stats,
                 indexed_slot,
                 target_dataset_id=target_dataset_id,
+                item_to_categories=item_to_categories,
             )
             features.loc[missing_ids] = filled
     else:
@@ -2218,6 +2828,7 @@ def _compute_ranking_features(
             indexed_stats,
             indexed_slot,
             target_dataset_id=target_dataset_id,
+            item_to_categories=item_to_categories,
         )
 
     override_feature_df = None
@@ -2248,6 +2859,7 @@ def _compute_ranking_features(
             feature_overrides=override_feature_df,
             stats_overrides=override_stats_df,
             target_dataset_id=target_dataset_id,
+            item_to_categories=item_to_categories,
         )
         if features.empty:
             features = refreshed
@@ -2319,6 +2931,22 @@ def _compute_ranking_features(
             features[key] = float(value)
         except (TypeError, ValueError):
             features[key] = 0.0
+
+    # === 按当前目标数据集重算"请求相关"特征 ===
+    # tag_overlap_count / tag_jaccard_similarity / same_top_category /
+    # category_overlap / category_match 都取决于"当前页面的目标数据集"，
+    # 而 precomputed_static 是启动时按 target=None 预计算的（这些列恒为 0）。
+    # 若不在这里重算，排序模型训练时学到的相关度信号在推理阶段会全部为 0。
+    if target_dataset_id is not None:
+        relevance = _compute_relevance_features(
+            list(features.index),
+            indexed_raw,
+            target_dataset_id,
+            item_to_categories,
+        )
+        if not relevance.empty:
+            for column in relevance.columns:
+                features[column] = relevance[column].reindex(features.index).fillna(0.0).astype(float)
 
     return features
 
@@ -2480,6 +3108,9 @@ def _apply_ranking(
         current_state = None
 
     dataset_ids = list(scores.keys())
+    # 行业类别索引（models/item_to_categories.json）：用于 category_overlap /
+    # category_match 排序特征，必须与训练侧口径一致
+    recall_indices = getattr(current_state, "recall_indices", None) or {}
     features = _compute_ranking_features(
         dataset_ids,
         raw_features,
@@ -2499,6 +3130,7 @@ def _apply_ranking(
         dataset_stats_indexed=getattr(current_state, "dataset_stats_indexed", None),
         slot_metrics_indexed=getattr(current_state, "slot_metrics_indexed", None),
         target_dataset_id=target_dataset_id,
+        item_to_categories=recall_indices.get("item_to_categories"),
     )
     if features.empty:
         return {}
@@ -2568,6 +3200,7 @@ def _log_exposure(
     degrade_reason: Optional[str],
     experiment_variant: Optional[str] = None,
     request_context: Optional[Dict[str, str]] = None,
+    channel_weights: Optional[Dict[str, float]] = None,
 ) -> None:
     exposure_items = [
         {
@@ -2577,7 +3210,7 @@ def _log_exposure(
         }
         for item in items
     ]
-    context = {"endpoint": event, "variant": variant}
+    context: Dict[str, Any] = {"endpoint": event, "variant": variant}
     if request_context:
         for key, value in request_context.items():
             if value not in (None, ""):
@@ -2586,6 +3219,17 @@ def _log_exposure(
         context["degrade_reason"] = degrade_reason
     if experiment_variant:
         context["experiment_variant"] = experiment_variant
+    # 记录本次请求实际生效的渠道权重：下游 pipeline/evaluate_v2 会把它读成
+    # channel_weights 列，build_training_labels 用它生成训练特征 channel_weight。
+    # 之前这里从不写入，导致排序模型看到的 channel_weight 恒为固定常量表，
+    # 与线上真实权重脱钩（改动权重时会产生训练/推理不一致）。
+    if channel_weights:
+        try:
+            context["channel_weights"] = {
+                str(key): float(value) for key, value in dict(channel_weights).items()
+            }
+        except (TypeError, ValueError):
+            LOGGER.warning("channel_weights 无法序列化到曝光日志，已跳过: %r", channel_weights)
     try:
         state = _get_app_state()
     except RuntimeError:
@@ -2734,6 +3378,27 @@ def load_models() -> None:
 
     app.state.recall_indices = _load_recall_artifacts(MODELS_DIR)
     app.state.user_history_sets = user_data_manager.get_history_sets()
+
+    # 不可售/已下架数据集过滤（业务硬约束）：从内存索引里彻底剔除，
+    # 保证既不会被召回，也不会进入探索池
+    excluded_ids = _load_excluded_dataset_ids()
+    app.state.excluded_dataset_ids = excluded_ids
+    if excluded_ids:
+        pruned = _prune_unavailable_datasets(
+            bundle=bundle,
+            recall_indices=app.state.recall_indices,
+            metadata=metadata,
+            dataset_tags=dataset_tags,
+            excluded=excluded_ids,
+        )
+        LOGGER.info(
+            "Pruned unavailable datasets: %d ids, %d index references removed (sample=%s)",
+            len(excluded_ids),
+            pruned,
+            sorted(excluded_ids)[:10],
+        )
+    else:
+        LOGGER.info("No excluded dataset ids configured (RECO_EXCLUDED_DATASET_IDS / models/excluded_dataset_ids.json)")
 
     # Initialize fallback strategy
     precomputed_dir = MODELS_DIR / "precomputed"
@@ -3003,6 +3668,10 @@ async def get_similar(
                 scores=scores,
                 reasons=reasons,
                 limit=limit,
+                weights=effective_weights,
+            )
+            _drop_excluded_from_scores(
+                scores, reasons, getattr(state, "excluded_dataset_ids", None) or set()
             )
             user_feature_map: Dict[str, float] = {}
             ranking_scores = await _call_blocking(
@@ -3034,10 +3703,11 @@ async def get_similar(
                 apply_mmr=True,
                 mmr_lambda=mmr_lambda,
                 ranking_scores=ranking_scores,  # 传递ranking分数用于展示
+                target_dataset_id=dataset_id,
+                item_to_categories=(getattr(state, "recall_indices", None) or {}).get("item_to_categories"),
             )
             return items, reasons, local_variant, local_bundle.run_id, effective_weights
 
-        compute_started = time.perf_counter()
         compute_started = time.perf_counter()
         try:
             items, reasons, variant, run_id, applied_channel_weights = await asyncio.wait_for(
@@ -3045,15 +3715,8 @@ async def get_similar(
                 timeout=TimeoutManager.get_timeout("recommendation_total"),
             )
             compute_duration = time.perf_counter() - compute_started
-            LOGGER.info(
-                "Recommendation compute completed (endpoint=%s, dataset=%s, user=%s, elapsed=%.3fs, items=%d)",
-                endpoint,
-                dataset_id,
-                user_id,
-                compute_duration,
-                len(items),
-            )
-            compute_duration = time.perf_counter() - compute_started
+            # 注意：/similar 接口没有 user_id 上下文（历史上固定为 None），
+            # 此处不能引用 user_id，否则抛 NameError 会被兜底逻辑接住 → 全部降级成 fallback:popular
             LOGGER.info(
                 "Recommendation compute completed (endpoint=%s, dataset=%s, user=%s, elapsed=%.3fs, items=%d)",
                 endpoint,
@@ -3164,6 +3827,7 @@ async def get_similar(
             degrade_reason=degrade_reason,
             experiment_variant=None,
             request_context=request_context,
+            channel_weights=applied_channel_weights,
         )
 
         if cache and cache.enabled and degrade_reason is None:
@@ -3323,6 +3987,10 @@ async def recommend_for_detail(
                 reasons=reasons,
                 limit=limit,
                 user_id=user_id,
+                weights=effective_weights,
+            )
+            _drop_excluded_from_scores(
+                scores, reasons, getattr(state, "excluded_dataset_ids", None) or set()
             )
             _log_stage_duration(
                 "multi_channel",
@@ -3380,9 +4048,11 @@ async def recommend_for_detail(
                 apply_mmr=True,
                 mmr_lambda=mmr_lambda,
                 apply_exploration=True,  # 启用探索机制
-                exploration_epsilon=0.15,  # 15%探索率
+                exploration_epsilon=EXPLORATION_EPSILON,  # 默认 0.10，可用环境变量 EXPLORATION_EPSILON 调整
                 all_dataset_ids=set(state.metadata.keys()),  # 全量dataset池
                 ranking_scores=ranking_scores,  # 传递ranking分数用于展示
+                target_dataset_id=dataset_id,
+                item_to_categories=(getattr(state, "recall_indices", None) or {}).get("item_to_categories"),
             )
             _log_stage_duration(
                 "response_build",
@@ -3516,6 +4186,7 @@ async def recommend_for_detail(
             degrade_reason=degrade_reason,
             experiment_variant=experiment_variant,
             request_context=request_context,
+            channel_weights=applied_channel_weights,
         )
 
         if cache and cache.enabled and user_id and degrade_reason is None:

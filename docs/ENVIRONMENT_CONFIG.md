@@ -133,6 +133,36 @@ HF_ENDPOINT=https://hf-mirror.com ENV_FILE=.env.prod python3 -m pipeline.train_m
 
 ## 关键配置项对比
 
+### 渠道权重与多样性/探索参数
+
+```bash
+# MMR 相关性-多样性权衡（λ 越大越偏相关性，取值被夹在 0.1~0.9）
+MMR_LAMBDA=0.5            # /recommend/detail 基准值
+MMR_LAMBDA_SIMILAR=0.4    # /similar 基准值
+
+# 探索率：结果尾部被替换为随机数据集的比例（取值被夹在 0~0.5）
+# 仅 /recommend/detail 生效；从 0.15 下调为 0.10
+EXPLORATION_EPSILON=0.10
+
+# 渠道权重保序（业务规则 vector=content > behavior > popular，2026-02 确认）
+CHANNEL_WEIGHT_OVERRIDE_BAND=0.4   # models/channel_weights.json 的单渠道浮动上限（±40%）
+CHANNEL_WEIGHT_MIN_GAP=0.15        # 相邻层级的最小差距（上一层至少高 15%）
+
+# 最终列表配额（防止某渠道/某行业刷屏）
+MAX_POPULAR_SHARE=0.25             # popular 来源占比上限（12 条 → 3 条）
+MAX_OTHER_CATEGORY_SHARE=0.25      # 非目标行业的单一类别占比上限（12 条 → 3 条）
+
+# 不可售/已下架数据集剔除（逗号分隔；也可用 models/excluded_dataset_ids.json）
+RECO_EXCLUDED_DATASET_IDS=669,8523
+```
+
+**配置说明**:
+- 这些变量在 `app/main.py` 中通过 `_env_float()` 读取：**值非法时回退默认值并打 WARNING，不会导致请求异常**
+- MMR 场景修正（search→0.6、landing/home→0.3、移动端 −0.1）在基准值之上生效
+- 渠道权重（vector/content/behavior/popular）的**默认值写在 `DEFAULT_CHANNEL_WEIGHTS`**，
+  可用 `config/experiments.yaml` 的实验参数（热加载）或 `models/channel_weights.json`
+  覆盖；无论怎么覆盖，最终都会经过保序与限幅处理
+
 ### Popular召回质量过滤配置 (2025-12-28)
 
 ```bash
@@ -144,6 +174,10 @@ POPULAR_MAX_INACTIVE_DAYS=730            # 最大不活跃天数(天)，730=2年
 POPULAR_POOL_MULTIPLIER=3                # 候选池扩大倍数
 POPULAR_ENABLE_FILTER=true               # 是否启用质量过滤
 ```
+
+> 注意：Popular 还有一层**运行时**质量过滤（`app/main.py` 的
+> `_combine_scores_with_weights`，条件为 `price < 1.90 且 交互 < 66`、
+> `不活跃 > 180 天 且 交互 < 30`），该层目前是代码内常量，不受上面这些环境变量影响。
 
 **配置说明**:
 - 这些参数在 `pipeline/train_models.py` 的 `build_popular_items()` 函数中使用

@@ -94,10 +94,16 @@ RANK_MODEL_PATH = MODELS_DIR / "rank_model.pkl"
 RANKING_SAMPLES_PATH = PROCESSED_DIR / "ranking_training_samples.parquet"
 USER_FEATURES_PATH = PROCESSED_DIR / "user_features_v2.parquet"
 
-# Standardized top-level categories for category relevance features (6 core categories)
+# Standardized top-level categories for category relevance features.
+# 必须与 app/main.py 的 TOP_CATEGORY_TOKENS（以及 enhance_tags.py 的 13 个类别）保持一致，
+# 否则 same_top_category 特征在训练/推理两侧口径不同、绝大多数情况会恒为 0。
 TOP_CATEGORIES_SET = frozenset([
-    "金融", "医疗健康", "政府政务",
-    "科技", "商业零售", "教育培训",
+    # 当前 13 个类别
+    "政府政务", "金融财经", "医疗健康", "交通物流", "教育科研", "工业制造",
+    "商业零售", "能源环保", "文化娱乐", "农业农村", "互联网科技", "社会民生",
+    "数字产品",
+    # 历史短名（旧标签里可能出现）
+    "金融", "交通运输", "教育培训", "农业", "科技",
 ])
 
 
@@ -1149,15 +1155,138 @@ def _prepare_ranking_dataset(
     return meta, features, target, sample_weight, task_type
 
 
+def _count_ranking_labels(path: Path) -> Tuple[int, int, int]:
+    """只读 label 一列，返回 (总行数, 正样本数, 负样本数)。
+
+    为什么值得单独扫一遍：只读单列的开销极小（实测 3281 万行 ≈ 420MB 峰值 / 0.3 秒），
+    但换来的是"在真正读数据之前就能算出该保留多少负样本"，
+    从而做到边读边采样，把峰值内存从几十 GB 降到几百 MB。
+    """
+    import pyarrow.compute as pc
+    import pyarrow.parquet as pq
+
+    table = pq.read_table(path, columns=["label"])
+    labels = table.column("label")
+    positives = int(pc.sum(pc.equal(labels, 1)).as_py() or 0)
+    return table.num_rows, positives, table.num_rows - positives
+
+
 def _load_ranking_samples() -> pd.DataFrame:
-    samples = _load_frame(RANKING_SAMPLES_PATH)
+    """流式加载排序训练样本，并在读取过程中按比例抽样（内存友好）。
+
+    ===== 为什么必须这样写（2026-09 实测，生产每日流水线失败根因）=====
+    ranking_training_samples.parquet 实测：3281 万行 × 24 列（其中 14 列是字符串），
+    且整个文件只有 1 个 row group（无法按行组流式访问）。用原来的
+    `pd.read_parquet` 一次性载入需要几十 GB（字符串列在 pandas 里膨胀 5~20 倍），
+    实测在 8GB 内存的机器上会被系统 OOM 直接 kill —— 这就是每日流水线
+    train_models 失败、进而让下游 recall_engine / train_channel_weights /
+    restart_if_changed 全部跳过（索引与权重因此长期停在旧日期）的根因。
+    而该文件里正样本只有约 7.7 千条（正:负 ≈ 1:4270），代码后续本来就要按
+    RANKING_DOWNSAMPLE_RATIO（默认 100，即 1:100）做负采样，
+    所以完全没有必要把 3281 万行读进内存。
+
+    ===== 做法 =====
+      1) 先只读 label 列，数出正/负样本数量（开销极小）；
+      2) 依据 RANKING_DOWNSAMPLE_RATIO / MAX_RANKING_SAMPLES 算出"负样本保留概率"；
+      3) 分批读取：正样本全留，负样本按概率留，边读边丢；
+      4) 只把抽样后的小结果拼接返回（本例 3281 万行 → 约 78 万行）。
+
+    ===== 可选环境变量（都不改变函数签名与调用方式）=====
+      RANKING_LOAD_BATCH_SIZE   单批读取行数，默认 200000
+      RANKING_DOWNSAMPLE_RATIO  正:负 目标比例，默认 100（沿用原逻辑；0 = 不抽样）
+      MAX_RANKING_SAMPLES       抽样后总行数上限，默认 0（不限制）
+
+    返回的 DataFrame 结构与原实现完全一致（同样的列、同样的行含义），
+    只是负样本已经是抽样后的子集；调用方后续的负采样逻辑会识别到
+    "比例已达标" 而自动跳过（日志：Skipping downsampling）。
+    """
+    path = RANKING_SAMPLES_PATH
+    if not path.exists():
+        LOGGER.warning(
+            "Ranking training samples missing or empty: %s. "
+            "Ranking model training will be skipped. "
+            "Run 'python -m pipeline.aggregate_matomo_events' and "
+            "'python -m pipeline.build_training_labels' to generate training samples.",
+            path,
+        )
+        return pd.DataFrame()
+
+    import pyarrow.parquet as pq
+
+    batch_size = max(1000, int(os.getenv("RANKING_LOAD_BATCH_SIZE", "200000")))
+    downsample_ratio = int(os.getenv("RANKING_DOWNSAMPLE_RATIO", "100"))
+    max_samples = int(os.getenv("MAX_RANKING_SAMPLES", "0"))
+
+    try:
+        total_rows, positives, negatives = _count_ranking_labels(path)
+    except Exception as exc:  # 兜底：预扫描失败时退回原来的全量加载（慢但语义不变）
+        LOGGER.warning(
+            "Pre-scan of ranking labels failed (%s); falling back to full load of %s",
+            exc,
+            path,
+        )
+        return _load_frame(path)
+
+    if total_rows == 0:
+        LOGGER.warning("Ranking training samples empty: %s", path)
+        return pd.DataFrame()
+
+    keep_prob = 1.0
+    if downsample_ratio > 0 and positives > 0 and negatives > positives * downsample_ratio:
+        keep_prob = (positives * downsample_ratio) / negatives
+    if max_samples > 0:
+        expected_rows = positives + negatives * keep_prob
+        if expected_rows > max_samples:
+            allowed_negatives = max(0.0, float(max_samples - positives))
+            keep_prob = min(keep_prob, allowed_negatives / max(1, negatives))
+
+    LOGGER.info(
+        "Ranking samples on disk: %d rows (positives=%d, negatives=%d); "
+        "streaming with negative keep-rate %.3f%% -> expect ~%.0f rows kept "
+        "(RANKING_DOWNSAMPLE_RATIO=%d, MAX_RANKING_SAMPLES=%d, batch=%d)",
+        total_rows,
+        positives,
+        negatives,
+        keep_prob * 100,
+        positives + negatives * keep_prob,
+        downsample_ratio,
+        max_samples,
+        batch_size,
+    )
+
+    rng = np.random.default_rng(42)
+    kept: List[pd.DataFrame] = []
+    read_rows = 0
+    parquet_file = pq.ParquetFile(path)
+    # 读取全部列，保证下游特征工程拿到的列与原来完全一致
+    for batch in parquet_file.iter_batches(batch_size=batch_size):
+        frame = batch.to_pandas()
+        read_rows += len(frame)
+        if keep_prob < 1.0:
+            if "label" in frame.columns:
+                is_positive = frame["label"] == 1
+            else:
+                is_positive = pd.Series(True, index=frame.index)
+            keep_mask = is_positive | (rng.random(len(frame)) < keep_prob)
+            frame = frame[keep_mask]
+        if not frame.empty:
+            kept.append(frame)
+        del batch, frame
+
+    samples = pd.concat(kept, ignore_index=True) if kept else pd.DataFrame()
+    del kept
+    LOGGER.info(
+        "Ranking samples loaded: %d rows kept (scanned %d rows from disk, memory-bounded)",
+        len(samples),
+        read_rows,
+    )
     if samples.empty:
         LOGGER.warning(
             "Ranking training samples missing or empty: %s. "
             "Ranking model training will be skipped. "
             "Run 'python -m pipeline.aggregate_matomo_events' and "
             "'python -m pipeline.build_training_labels' to generate training samples.",
-            RANKING_SAMPLES_PATH,
+            path,
         )
     return samples
 
@@ -2147,7 +2276,24 @@ def main() -> None:
         params["ranking_best_params"] = json.dumps(ranking_model.get("best_params", {}), ensure_ascii=False)
         metrics["ranking_tuning_trials"] = float(len(ranking_model["tuning_trials"]))
 
-    run_info = _log_to_mlflow(params, metrics, artifacts)
+    # MLflow 上报属于“可观测性”副作用，绝不能拖垮整条流水线。
+    # 生产事故实测（2026-09 定位）：MLflow 容器掉出容器网络后主机名无法解析，
+    # 这一行抛 MlflowException("Failed to resolve 'mlflow'") → train_models 退出码 1
+    # → 任务判失败 → 下游 recall_engine（索引重建）/ train_channel_weights（权重重算）/
+    # restart_if_changed（服务重载）全部被跳过，索引与权重因此长期停在旧日期，
+    # 推荐服务也一直不刷新（“看了又看”退化成全局热销榜）。
+    # 现在改为：上报失败只告警，不影响训练结果与后续任务。
+    try:
+        run_info = _log_to_mlflow(params, metrics, artifacts)
+    except Exception as exc:  # noqa: BLE001 - 任何上报异常都不应中断流水线
+        LOGGER.warning(
+            "MLflow logging failed (%s: %s); 已忽略，训练结果与后续任务不受影响。"
+            "请检查 MLFLOW_TRACKING_URI=%s 是否可达（容器网络 / 主机名解析）。",
+            type(exc).__name__,
+            exc,
+            MLFLOW_TRACKING_URI,
+        )
+        run_info = {"run_id": "mlflow-unavailable", "artifact_uri": ""}
     entry = {
         "run_id": run_info["run_id"],
         "artifact_uri": run_info["artifact_uri"],
